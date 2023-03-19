@@ -3,7 +3,6 @@
 #include "ppsspp_config.h"
 
 #include <string>
-#include <vector>
 #include <cstdint>
 
 #include "Common/LogManager.h"
@@ -29,3 +28,4 @@ public:
 #endif
 
 #endif
+

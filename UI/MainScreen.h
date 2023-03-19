@@ -102,6 +102,8 @@ public:
 
 	bool isTopLevel() const override { return true; }
 
+	const char *tag() const override { return "Main"; }
+
 	// Horrible hack to show the demos & homebrew tab after having installed a game from a zip file.
 	static bool showHomebrewTab;
 
@@ -112,7 +114,6 @@ protected:
 	void sendMessage(const char *message, const char *value) override;
 	void dialogFinished(const Screen *dialog, DialogResult result) override;
 
-	bool UseVerticalLayout() const;
 	bool DrawBackgroundFor(UIContext &dc, const Path &gamePath, float progress);
 
 	UI::EventReturn OnGameSelected(UI::EventParams &e);
@@ -153,7 +154,7 @@ protected:
 
 class UmdReplaceScreen : public UIDialogScreenWithBackground {
 public:
-	UmdReplaceScreen() {}
+	const char *tag() const override { return "UmdReplace"; }
 
 protected:
 	void CreateViews() override;
@@ -164,7 +165,6 @@ private:
 	UI::EventReturn OnGameSelected(UI::EventParams &e);
 	UI::EventReturn OnGameSelectedInstant(UI::EventParams &e);
 
-	UI::EventReturn OnCancel(UI::EventParams &e);
 	UI::EventReturn OnGameSettings(UI::EventParams &e);
 };
 
@@ -173,6 +173,8 @@ public:
 	GridSettingsScreen(std::string label) : PopupScreen(label) {}
 	void CreatePopupContents(UI::ViewGroup *parent) override;
 	UI::Event OnRecentChanged;
+
+	const char *tag() const override { return "GridSettings"; }
 
 private:
 	UI::EventReturn GridPlusClick(UI::EventParams &e);

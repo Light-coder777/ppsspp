@@ -37,6 +37,7 @@ enum class IdentifiedFileType {
 
 	UNKNOWN_BIN,
 	UNKNOWN_ELF,
+	UNKNOWN_ISO,
 
 	// Try to reduce support emails...
 	ARCHIVE_RAR,
@@ -93,7 +94,7 @@ public:
 class ProxiedFileLoader : public FileLoader {
 public:
 	ProxiedFileLoader(FileLoader *backend) : backend_(backend) {}
-	~ProxiedFileLoader() override {
+	~ProxiedFileLoader() {
 		// Takes ownership.
 		delete backend_;
 	}

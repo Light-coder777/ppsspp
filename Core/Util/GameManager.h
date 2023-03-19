@@ -58,7 +58,7 @@ public:
 	void Update();
 
 	GameManagerState GetState() {
-		if (installInProgress_)
+		if (installInProgress_ || installDonePending_)
 			return GameManagerState::INSTALLING;
 		if (curDownload_)
 			return GameManagerState::DOWNLOADING;
@@ -68,6 +68,7 @@ public:
 	float GetCurrentInstallProgressPercentage() const {
 		return installProgress_;
 	}
+	void ResetInstallError();
 	std::string GetInstallError() const {
 		return installError_;
 	}
@@ -78,6 +79,7 @@ public:
 private:
 	bool InstallGame(Path url, Path tempFileName, bool deleteAfter);
 	bool InstallMemstickGame(struct zip *z, const Path &zipFile, const Path &dest, const ZipFileInfo &info, bool allowRoot, bool deleteAfter);
+	bool InstallMemstickZip(struct zip *z, const Path &zipFile, const Path &dest, const ZipFileInfo &info, bool deleteAfter);
 	bool InstallZippedISO(struct zip *z, int isoFileIndex, const Path &zipfile, bool deleteAfter);
 	bool InstallRawISO(const Path &zipFile, const std::string &originalName, bool deleteAfter);
 	void InstallDone();

@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 #include "Common/Swap.h"
 #include "GPU/GPU.h"
 #include "GPU/ge_constants.h"
@@ -206,13 +206,14 @@ struct GPUgstate {
 	float boneMatrix[12 * 8];  // Eight 4x3 bone matrices.
 
 	// We ignore the high bits of the framebuffer in fbwidth - even 0x08000000 renders to vRAM.
-	u32 getFrameBufRawAddress() const { return (fbptr & 0xFFFFFF); }
+	// The top bits of mirroring are also not respected, so we mask them away.
+	u32 getFrameBufRawAddress() const { return fbptr & 0x1FFFF0; }
 	// 0x44000000 is uncached VRAM.
 	u32 getFrameBufAddress() const { return 0x44000000 | getFrameBufRawAddress(); }
 	GEBufferFormat FrameBufFormat() const { return static_cast<GEBufferFormat>(framebufpixformat & 3); }
 	int FrameBufStride() const { return fbwidth&0x7FC; }
-	u32 getDepthBufRawAddress() const { return (zbptr & 0xFFFFFF); }
-	u32 getDepthBufAddress() const { return 0x44000000 | getDepthBufRawAddress(); }
+	u32 getDepthBufRawAddress() const { return zbptr & 0x1FFFF0; }
+	u32 getDepthBufAddress() const { return 0x44600000 | getDepthBufRawAddress(); }
 	int DepthBufStride() const { return zbwidth&0x7FC; }
 
 	// Pixel Pipeline
@@ -298,12 +299,16 @@ struct GPUgstate {
 	bool isTextureAlphaUsed() const { return (texfunc & 0x100) != 0; }
 	GETextureFormat getTextureFormat() const { return static_cast<GETextureFormat>(texformat & 0xF); }
 	bool isTextureFormatIndexed() const { return (texformat & 4) != 0; } // GE_TFMT_CLUT4 - GE_TFMT_CLUT32 are 0b1xx.
-	int getTextureEnvColR() const { return texenvcolor&0xFF; }
-	int getTextureEnvColG() const { return (texenvcolor>>8)&0xFF; }
-	int getTextureEnvColB() const { return (texenvcolor>>16)&0xFF; }
+	int getTextureEnvColRGB() const { return texenvcolor & 0x00FFFFFF; }
 	u32 getClutAddress() const { return (clutaddr & 0x00FFFFF0) | ((clutaddrupper << 8) & 0x0F000000); }
-	int getClutLoadBytes() const { return (loadclut & 0x3F) * 32; }
-	int getClutLoadBlocks() const { return (loadclut & 0x3F); }
+	int getClutLoadBytes() const { return getClutLoadBlocks() * 32; }
+	int getClutLoadBlocks() const {
+		// The PSP only supports 0x3F, but Misshitsu no Sacrifice has extra color data (see #15727.)
+		// 0x40 would be 0, which would be a no-op, so we allow it.
+		if ((loadclut & 0x7F) == 0x40)
+			return 0x40;
+		return loadclut & 0x3F;
+	}
 	GEPaletteFormat getClutPaletteFormat() const { return static_cast<GEPaletteFormat>(clutformat & 3); }
 	int getClutIndexShift() const { return (clutformat >> 2) & 0x1F; }
 	int getClutIndexMask() const { return (clutformat >> 8) & 0xFF; }
@@ -340,7 +345,7 @@ struct GPUgstate {
 	unsigned int getAmbientB() const { return (ambientcolor>>16)&0xFF; }
 	unsigned int getAmbientA() const { return ambientalpha&0xFF; }
 	unsigned int getAmbientRGBA() const { return (ambientcolor&0xFFFFFF) | ((ambientalpha&0xFF)<<24); }
-	unsigned int getMaterialUpdate() const { return materialupdate&0xFFFFFF; }
+	unsigned int getMaterialUpdate() const { return materialupdate & 7; }
 	unsigned int getMaterialAmbientR() const { return materialambient&0xFF; }
 	unsigned int getMaterialAmbientG() const { return (materialambient>>8)&0xFF; }
 	unsigned int getMaterialAmbientB() const { return (materialambient>>16)&0xFF; }
@@ -388,8 +393,8 @@ struct GPUgstate {
 	int getScissorY1() const { return (scissor1 >> 10) & 0x3FF; }
 	int getScissorX2() const { return scissor2 & 0x3FF; }
 	int getScissorY2() const { return (scissor2 >> 10) & 0x3FF; }
-	int getRegionX1() const { return region1 & 0x3FF; }
-	int getRegionY1() const { return (region1 >> 10) & 0x3FF; }
+	int getRegionRateX() const { return 0x100 + (region1 & 0x3FF); }
+	int getRegionRateY() const { return 0x100 + ((region1 >> 10) & 0x3FF); }
 	int getRegionX2() const { return (region2 & 0x3FF); }
 	int getRegionY2() const { return (region2 >> 10) & 0x3FF; }
 
@@ -403,7 +408,7 @@ struct GPUgstate {
 	float getViewportYCenter() const { return getFloat24(viewportycenter); }
 	float getViewportZCenter() const { return getFloat24(viewportzcenter); }
 
-	// Fixed 16 point.
+	// Fixed 12.4 point.
 	int getOffsetX16() const { return offsetx & 0xFFFF; }
 	int getOffsetY16() const { return offsety & 0xFFFF; }
 	float getOffsetX() const { return (float)getOffsetX16() / 16.0f; }
@@ -440,7 +445,7 @@ struct GPUgstate {
 
 	void Reset();
 	void Save(u32_le *ptr);
-	void Restore(u32_le *ptr);
+	void Restore(const u32_le *ptr);
 };
 
 bool vertTypeIsSkinningEnabled(u32 vertType);
@@ -461,40 +466,47 @@ struct UVScale {
 
 #define FLAG_BIT(x) (1 << x)
 
-// Some of these are OpenGL-specific even though this file is neutral, unfortunately.
-// Might want to move this mechanism into the backend later.
+// These flags are mainly to make sure that we make decisions on code path in a single
+// location. Sometimes we need to take things into account in multiple places, it helps
+// to centralize into flags like this. They're also fast to check since the cache line
+// will be hot.
+// NOTE: Do not forget to update the string array at the end of GPUState.cpp!
 enum {
-	GPU_SUPPORTS_DUALSOURCE_BLEND = FLAG_BIT(0),
-	GPU_SUPPORTS_GLSL_ES_300 = FLAG_BIT(1),
-	GPU_SUPPORTS_GLSL_330 = FLAG_BIT(2),
-	GPU_SUPPORTS_VS_RANGE_CULLING = FLAG_BIT(3),
-	GPU_SUPPORTS_BLEND_MINMAX = FLAG_BIT(4),
-	GPU_SUPPORTS_LOGIC_OP = FLAG_BIT(5),
-	GPU_USE_DEPTH_RANGE_HACK = FLAG_BIT(6),
-	GPU_SUPPORTS_ANISOTROPY = FLAG_BIT(8),
+	GPU_USE_DUALSOURCE_BLEND = FLAG_BIT(0),
+	GPU_USE_LIGHT_UBERSHADER = FLAG_BIT(1),
+	GPU_USE_FRAGMENT_TEST_CACHE = FLAG_BIT(2),
+	GPU_USE_VS_RANGE_CULLING = FLAG_BIT(3),
+	GPU_USE_BLEND_MINMAX = FLAG_BIT(4),
+	GPU_USE_LOGIC_OP = FLAG_BIT(5),
+	// Bit 6 is free.
+	GPU_USE_TEXTURE_NPOT = FLAG_BIT(7),
+	GPU_USE_ANISOTROPY = FLAG_BIT(8),
 	GPU_USE_CLEAR_RAM_HACK = FLAG_BIT(9),
-	GPU_SUPPORTS_INSTANCE_RENDERING = FLAG_BIT(10),
-	GPU_SUPPORTS_VERTEX_TEXTURE_FETCH = FLAG_BIT(11),
-	GPU_SUPPORTS_TEXTURE_FLOAT = FLAG_BIT(12),
-	GPU_SUPPORTS_16BIT_FORMATS = FLAG_BIT(13),
-	GPU_SUPPORTS_DEPTH_CLAMP = FLAG_BIT(14),
-	GPU_SUPPORTS_32BIT_INT_FSHADER = FLAG_BIT(15),
-	GPU_SUPPORTS_DEPTH_TEXTURE = FLAG_BIT(16),
-	GPU_SUPPORTS_ACCURATE_DEPTH = FLAG_BIT(17),
-	// Free bit: 18
-	GPU_SUPPORTS_COPY_IMAGE = FLAG_BIT(19),
-	GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH = FLAG_BIT(20),
+	GPU_USE_INSTANCE_RENDERING = FLAG_BIT(10),
+	GPU_USE_VERTEX_TEXTURE_FETCH = FLAG_BIT(11),
+	GPU_USE_TEXTURE_FLOAT = FLAG_BIT(12),
+	GPU_USE_16BIT_FORMATS = FLAG_BIT(13),
+	GPU_USE_DEPTH_CLAMP = FLAG_BIT(14),
+	GPU_USE_TEXTURE_LOD_CONTROL = FLAG_BIT(15),
+	GPU_USE_DEPTH_TEXTURE = FLAG_BIT(16),
+	GPU_USE_ACCURATE_DEPTH = FLAG_BIT(17),
+	GPU_USE_GS_CULLING = FLAG_BIT(18),  // Geometry shader
+	// Bit 19 free.
+	GPU_USE_FRAMEBUFFER_FETCH = FLAG_BIT(20),
 	GPU_SCALE_DEPTH_FROM_24BIT_TO_16BIT = FLAG_BIT(21),
 	GPU_ROUND_FRAGMENT_DEPTH_TO_16BIT = FLAG_BIT(22),
 	GPU_ROUND_DEPTH_TO_16BIT = FLAG_BIT(23),  // Can be disabled either per game or if we use a real 16-bit depth buffer
-	GPU_SUPPORTS_TEXTURE_LOD_CONTROL = FLAG_BIT(24),
-	GPU_SUPPORTS_FRAMEBUFFER_BLIT = FLAG_BIT(26),
-	GPU_SUPPORTS_FRAMEBUFFER_BLIT_TO_DEPTH = FLAG_BIT(27),
-	GPU_SUPPORTS_TEXTURE_NPOT = FLAG_BIT(28),
-	GPU_SUPPORTS_CLIP_DISTANCE = FLAG_BIT(29),
-	GPU_SUPPORTS_CULL_DISTANCE = FLAG_BIT(30),
-	GPU_PREFER_REVERSE_COLOR_ORDER = FLAG_BIT(31),
+	GPU_USE_CLIP_DISTANCE = FLAG_BIT(24),
+	GPU_USE_CULL_DISTANCE = FLAG_BIT(25),
+
+	// VR flags (reserved or in-use)
+	GPU_USE_VIRTUAL_REALITY = FLAG_BIT(29),
+	GPU_USE_SINGLE_PASS_STEREO = FLAG_BIT(30),
+	GPU_USE_SIMPLE_STEREO_PERSPECTIVE = FLAG_BIT(31),
 };
+
+// Note that this take a flag index, not the bit value.
+const char *GpuUseFlagToString(int useFlag);
 
 struct KnownVertexBounds {
 	u16 minU;
@@ -512,8 +524,11 @@ enum class SubmitType {
 };
 
 struct GPUStateCache {
-	bool Supports(u32 flags) { return (featureFlags & flags) != 0; } // Return true if ANY of flags are true.
-	bool SupportsAll(u32 flags) { return (featureFlags & flags) == flags; } // Return true if ALL flags are true.
+	bool Use(u32 flags) const { return (useFlags_ & flags) != 0; } // Return true if ANY of flags are true.
+	bool UseAll(u32 flags) const { return (useFlags_ & flags) == flags; } // Return true if ALL flags are true.
+
+	u32 UseFlags() const { return useFlags_; }
+
 	uint64_t GetDirtyUniforms() { return dirty & DIRTY_ALL_UNIFORMS; }
 	void Dirty(u64 what) {
 		dirty |= what;
@@ -527,16 +542,16 @@ struct GPUStateCache {
 	bool IsDirty(u64 what) const {
 		return (dirty & what) != 0ULL;
 	}
-	void SetUseShaderDepal(bool depal) {
-		if (depal != useShaderDepal) {
-			useShaderDepal = depal;
+	void SetUseShaderDepal(ShaderDepalMode mode) {
+		if (mode != shaderDepalMode) {
+			shaderDepalMode = mode;
 			Dirty(DIRTY_FRAGMENTSHADER_STATE);
 		}
 	}
 	void SetTextureFullAlpha(bool fullAlpha) {
 		if (fullAlpha != textureFullAlpha) {
 			textureFullAlpha = fullAlpha;
-			Dirty(DIRTY_FRAGMENTSHADER_STATE);
+			Dirty(DIRTY_FRAGMENTSHADER_STATE | DIRTY_TEX_ALPHA_MUL);
 		}
 	}
 	void SetNeedShaderTexclamp(bool need) {
@@ -547,20 +562,48 @@ struct GPUStateCache {
 				Dirty(DIRTY_TEXCLAMP);
 		}
 	}
-	void SetAllowFramebufferRead(bool allow) {
-		if (allowFramebufferRead != allow) {
-			allowFramebufferRead = allow;
+	void SetTextureIs3D(bool is3D) {
+		if (is3D != curTextureIs3D) {
+			curTextureIs3D = is3D;
+			Dirty(DIRTY_FRAGMENTSHADER_STATE | (is3D ? DIRTY_MIPBIAS : 0));
+		}
+	}
+	void SetTextureIsArray(bool isArrayTexture) {  // VK only
+		if (arrayTexture != isArrayTexture) {
+			arrayTexture = isArrayTexture;
 			Dirty(DIRTY_FRAGMENTSHADER_STATE);
 		}
 	}
+	void SetTextureIsBGRA(bool isBGRA) {
+		if (bgraTexture != isBGRA) {
+			bgraTexture = isBGRA;
+			Dirty(DIRTY_FRAGMENTSHADER_STATE);
+		}
+	}
+	void SetUseFlags(u32 newFlags) {
+		if (newFlags != useFlags_) {
+			if (useFlags_ != 0)
+				useFlagsChanged = true;
+			useFlags_ = newFlags;
+		}
+	}
 
-	u32 featureFlags;
+	// When checking for a single flag, use Use()/UseAll().
+	u32 GetUseFlags() const {
+		return useFlags_;
+	}
 
+private:
+	u32 useFlags_;
+public:
 	u32 vertexAddr;
 	u32 indexAddr;
 	u32 offsetAddr;
 
 	uint64_t dirty;
+
+	bool usingDepth;  // For deferred depth copies.
+	bool clearingDepth;
 
 	bool textureFullAlpha;
 	bool vertexFullAlpha;
@@ -571,7 +614,8 @@ struct GPUStateCache {
 
 	bool bgraTexture;
 	bool needShaderTexClamp;
-	bool allowFramebufferRead;
+	bool arrayTexture;
+	bool useFlagsChanged;
 
 	float morphWeights[8];
 	u32 deferredVertTypeDirty;
@@ -580,8 +624,9 @@ struct GPUStateCache {
 	u32 curTextureHeight;
 	u32 actualTextureHeight;
 	// Only applied when needShaderTexClamp = true.
-	u32 curTextureXOffset;
-	u32 curTextureYOffset;
+	int curTextureXOffset;
+	int curTextureYOffset;
+	bool curTextureIs3D;
 
 	float vpWidth;
 	float vpHeight;
@@ -595,25 +640,34 @@ struct GPUStateCache {
 
 	KnownVertexBounds vertBounds;
 
+	GEBufferFormat framebufFormat;
+	// Some games use a very specific masking setup to draw into the alpha channel of a 4444 target using the blue channel of a 565 target.
+	// This is done because on PSP you can't write to destination alpha, other than stencil values, which can't be set from a texture.
+	// Examples of games that do this: Outrun, Split/Second.
+	// We detect this case and go into a special drawing mode.
+	bool blueToAlpha;
+
 	// TODO: These should be accessed from the current VFB object directly.
 	u32 curRTWidth;
 	u32 curRTHeight;
 	u32 curRTRenderWidth;
 	u32 curRTRenderHeight;
 
-	void SetCurRTOffsetX(int off) {
-		if (off != curRTOffsetX) {
-			curRTOffsetX = off;
-			Dirty(DIRTY_VIEWPORTSCISSOR_STATE);
+	void SetCurRTOffset(int xoff, int yoff) {
+		if (xoff != curRTOffsetX || yoff != curRTOffsetY) {
+			curRTOffsetX = xoff;
+			curRTOffsetY = yoff;
+			Dirty(DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_PROJTHROUGHMATRIX);
 		}
 	}
-	u32 curRTOffsetX;
+	int curRTOffsetX;
+	int curRTOffsetY;
 
 	// Set if we are doing hardware bezier/spline.
 	SubmitType submitType;
 	int spline_num_points_u;
 
-	bool useShaderDepal;
+	ShaderDepalMode shaderDepalMode;
 	GEBufferFormat depalFramebufferFormat;
 
 	u32 getRelativeAddress(u32 data) const;

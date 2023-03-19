@@ -1,3 +1,5 @@
+#include <inttypes.h>
+
 #include "Common/File/AndroidStorage.h"
 #include "Common/StringUtils.h"
 #include "Common/Log.h"
@@ -160,7 +162,9 @@ static bool ParseFileInfo(const std::string &line, File::FileInfo *fileInfo) {
 	fileInfo->exists = true;
 	sscanf(parts[1].c_str(), "%" PRIu64, &fileInfo->size);
 	fileInfo->isWritable = true;  // TODO: Should be passed as part of the string.
-	fileInfo->access = fileInfo->isDirectory ? 0666 : 0777;  // TODO: For read-only mappings, reflect that here, similarly as with isWritable.
+	// TODO: For read-only mappings, reflect that here, similarly as with isWritable.
+	// Directories are normally executable (0111) which means they're traversable.
+	fileInfo->access = fileInfo->isDirectory ? 0777 : 0666;
 
 	uint64_t lastModifiedMs = 0;
 	sscanf(parts[3].c_str(), "%" PRIu64, &lastModifiedMs);
@@ -204,11 +208,13 @@ bool Android_FileExists(const std::string &fileUri) {
 	return exists;
 }
 
-std::vector<File::FileInfo> Android_ListContentUri(const std::string &path) {
+std::vector<File::FileInfo> Android_ListContentUri(const std::string &path, bool *exists) {
 	if (!g_nativeActivity) {
+		*exists = false;
 		return std::vector<File::FileInfo>();
 	}
 	auto env = getEnv();
+	*exists = true;
 
 	double start = time_now_d();
 
@@ -222,8 +228,12 @@ std::vector<File::FileInfo> Android_ListContentUri(const std::string &path) {
 		jstring str = (jstring)env->GetObjectArrayElement(fileList, i);
 		const char *charArray = env->GetStringUTFChars(str, 0);
 		if (charArray) {  // paranoia
+			std::string line = charArray;
 			File::FileInfo info;
-			if (ParseFileInfo(std::string(charArray), &info)) {
+			if (line == "X") {
+				// Indicates an exception thrown, path doesn't exist.
+				*exists = false;
+			} else if (ParseFileInfo(line, &info)) {
 				// We can just reconstruct the URI.
 				info.fullName = Path(path) / info.name;
 				items.push_back(info);
@@ -236,7 +246,7 @@ std::vector<File::FileInfo> Android_ListContentUri(const std::string &path) {
 
 	double elapsed = time_now_d() - start;
 	if (elapsed > 0.1) {
-		INFO_LOG(FILESYS, "Listing directory on content URI took %0.3f s (%d files)", elapsed, (int)size);
+		INFO_LOG(FILESYS, "Listing directory on content URI took %0.3f s (%d files)", elapsed, (int)items.size());
 	}
 	return items;
 }

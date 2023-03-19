@@ -156,6 +156,7 @@ static const HardHashTableEntry hardcodedHashes[] = {
 	{ 0x1f53eac122f96b37, 224, "cosf", },
 	{ 0x2097a8b75c8fe651, 436, "atan2", },
 	{ 0x21411b3c860822c0, 36, "matrix_scale_q_t", },
+	{ 0x2161ea81a06bcacd, 1032, "soltrigger_render_ucschar", }, // Sol Trigger
 	{ 0x24d82a8675800808, 220, "ceilf", },
 	{ 0x26cc90cb25af9d27, 476, "log10", },
 	{ 0x275c79791a2bab83, 116, "rezel_cross_download_frame", }, // Rezel Cross
@@ -288,6 +289,7 @@ static const HardHashTableEntry hardcodedHashes[] = {
 	{ 0x70a6152b265228e8, 296, "unendingbloodycall_download_frame", }, // unENDing Bloody Call
 	{ 0x7245b74db370ae72, 64, "vmmul_q_transp3", },
 	{ 0x7259d52b21814a5a, 40, "vtfm_t_transp", },
+	{ 0x730f59cc6c0f5732, 452, "godseaterburst_depthmask_5551", }, // Gods Eater Burst (US)
 	{ 0x7354fd206796d817, 864, "flowers_download_frame", }, // Flowers
 	{ 0x736b34ebc702d873, 104, "vmmul_q_transp", },
 	{ 0x73a614c08f777d52, 792, "danganronpa2_2_download_frame", }, // Danganronpa 2
@@ -353,6 +355,7 @@ static const HardHashTableEntry hardcodedHashes[] = {
 	{ 0x9f269daa6f0da803, 128, "dl_write_scissor_region", },
 	{ 0x9f7919eeb43982b0, 208, "__fixdfsi", },
 	{ 0xa1c9b0a2c71235bf, 1752, "marvelalliance1_copy" }, // Marvel Ultimate Alliance 1 (EU)
+	{ 0x9b76c7f2a41aa805, 1752, "marvelalliance1_copy" }, // Marvel Ultimate alliance 1 (US)
 	{ 0xa1ca0640f11182e7, 72, "strcspn", },
 	{ 0xa243486be51ce224, 272, "cosf", },
 	{ 0xa2bcef60a550a3ef, 92, "matrix_rot_z", },
@@ -506,6 +509,9 @@ static const HardHashTableEntry hardcodedHashes[] = {
 	{ 0xfe5dd338ab862291, 216, "memset", }, // Metal Gear Solid: Peace Walker demo
 	{ 0xffc8f5f8f946152c, 192, "dl_write_light_color", },
 	{ 0x249a3c5981c73480, 1472, "openseason_data_decode", },  // Open Season
+	{ 0x795d940ad0a605f8, 40, "gow_fps_hack", }, // God of War (all)
+	{ 0x4c75043b7b0c643b, 512, "gow_vortex_hack", }, // God of War: Ghost of Sparta vortex timer hack, avoids softlock #8299
+	{ 0x7624dde603717640, 288, "ZZT3_select_hack", }, // Zettai Zetsumei Toshi 3 - bypasses softlock on character select screen #4901
 };
 
 namespace MIPSAnalyst {
@@ -605,25 +611,7 @@ namespace MIPSAnalyst {
 
 	int OpMemoryAccessSize(u32 pc) {
 		const auto op = Memory::Read_Instruction(pc, true);
-		MIPSInfo info = MIPSGetInfo(op);
-		if ((info & (IN_MEM | OUT_MEM)) == 0) {
-			return 0;
-		}
-
-		// TODO: Verify lwl/lwr/etc.?
-		switch (info & MEMTYPE_MASK) {
-		case MEMTYPE_BYTE:
-			return 1;
-		case MEMTYPE_HWORD:
-			return 2;
-		case MEMTYPE_WORD:
-		case MEMTYPE_FLOAT:
-			return 4;
-		case MEMTYPE_VQUAD:
-			return 16;
-		}
-
-		return 0;
+		return MIPSGetMemoryAccessSize(op);
 	}
 
 	bool IsOpMemoryWrite(u32 pc) {
@@ -685,7 +673,7 @@ namespace MIPSAnalyst {
 			int vt = (((op >> 16) & 0x1f)) | ((op & 1) << 5);
 			float rd[4];
 			ReadVector(rd, V_Quad, vt);
-			return memcmp(rd, Memory::GetPointer(addr), sizeof(float) * 4) != 0;
+			return memcmp(rd, Memory::GetPointerRange(addr, 16), sizeof(float) * 4) != 0;
 		}
 
 		// TODO: Technically, the break might be for 1 byte in the middle of a sw.
@@ -767,7 +755,7 @@ namespace MIPSAnalyst {
 		for (auto iter = functions.begin(); iter != functions.end(); iter++) {
 			AnalyzedFunction &f = *iter;
 			if (f.hasHash && f.size > 16) {
-				hashToFunction.insert(std::make_pair(f.hash, &f));
+				hashToFunction.emplace(f.hash, &f);
 			}
 		}
 	}
@@ -1416,6 +1404,7 @@ skip:
 
 	std::vector<MIPSGPReg> GetOutputRegs(MIPSOpcode op) {
 		std::vector<MIPSGPReg> vec;
+		vec.reserve(3);
 		MIPSInfo info = MIPSGetInfo(op);
 		if (info & OUT_RD) vec.push_back(MIPS_GET_RD(op));
 		if (info & OUT_RT) vec.push_back(MIPS_GET_RT(op));
@@ -1458,7 +1447,7 @@ skip:
 			}
 			break;
 		case 0x08:	// addi
-		case 0x09:	// adiu
+		case 0x09:	// addiu
 			info.hasRelevantAddress = true;
 			info.relevantAddress = cpu->GetRegValue(0,MIPS_GET_RS(op))+((s16)(op & 0xFFFF));
 			break;
@@ -1546,21 +1535,7 @@ skip:
 		// lw, sh, ...
 		if (!IsSyscall(op) && (opInfo & (IN_MEM | OUT_MEM)) != 0) {
 			info.isDataAccess = true;
-			switch (opInfo & MEMTYPE_MASK) {
-			case MEMTYPE_BYTE:
-				info.dataSize = 1;
-				break;
-			case MEMTYPE_HWORD:
-				info.dataSize = 2;
-				break;
-			case MEMTYPE_WORD:
-			case MEMTYPE_FLOAT:
-				info.dataSize = 4;
-				break;
-
-			case MEMTYPE_VQUAD:
-				info.dataSize = 16;
-			}
+			info.dataSize = MIPSGetMemoryAccessSize(op);
 
 			u32 rs = cpu->GetRegValue(0, (int)MIPS_GET_RS(op));
 			s16 imm16 = op & 0xFFFF;

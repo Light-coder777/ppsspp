@@ -150,7 +150,7 @@ bool TestJit() {
 		for (size_t j = 0; j < ARRAY_SIZE(lines); ++j) {
 			p++;
 			if (!MIPSAsm::MipsAssembleOpcode(lines[j], currentDebugMIPS, addr)) {
-				printf("ERROR: %ls\n", MIPSAsm::GetAssembleError().c_str());
+				printf("ERROR: %s\n", MIPSAsm::GetAssembleError().c_str());
 				compileSuccess = false;
 			}
 			addr += 4;
@@ -184,8 +184,12 @@ bool TestJit() {
 		std::vector<std::string> lines = DisassembleArm2(block->normalEntry, block->codeSize);
 #elif PPSSPP_ARCH(ARM64)
 		std::vector<std::string> lines = DisassembleArm64(block->normalEntry, block->codeSize);
-#else
+#elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
 		std::vector<std::string> lines = DisassembleX86(block->normalEntry, block->codeSize);
+#elif PPSSPP_ARCH(RISCV64)
+		std::vector<std::string> lines = DisassembleRV64(block->normalEntry, block->codeSize);
+#else
+		std::vector<std::string> lines;
 #endif
 		// Cut off at 25 due to the repetition above. Might need tweaking for large instructions.
 		const int cutoff = 25;

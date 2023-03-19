@@ -1,13 +1,14 @@
+#include "Common/Data/Format/JSONReader.h"
 #include "Common/File/VFS/VFS.h"
 #include "Common/File/Path.h"
 #include "Common/File/FileUtil.h"
-#include "Common/Data/Format/JSONReader.h"
+#include "Common/Log.h"
 
 namespace json {
 
 JsonReader::JsonReader(const std::string &filename) {
 	size_t buf_size;
-	buffer_ = (char *)VFSReadFile(filename.c_str(), &buf_size);
+	buffer_ = (char *)g_VFS.ReadFile(filename.c_str(), &buf_size);
 	if (buffer_) {
 		parse();
 	} else {
@@ -19,6 +20,17 @@ JsonReader::JsonReader(const std::string &filename) {
 			ERROR_LOG(IO, "Failed to read json file '%s'", filename.c_str());
 		}
 	}
+}
+
+bool JsonReader::parse() {
+	char *error_pos;
+	int status = jsonParse(buffer_, &error_pos, &root_, alloc_);
+	if (status != JSON_OK) {
+		ERROR_LOG(IO, "Error at (%i): %s\n%s\n\n", (int)(error_pos - buffer_), jsonStrError(status), error_pos);
+		return false;
+	}
+	ok_ = true;
+	return true;
 }
 
 int JsonGet::numChildren() const {

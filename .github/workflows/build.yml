@@ -7,7 +7,7 @@ on:
     # For testing.
     - actions
     tags:
-      - "v*.*.*"
+      - "v*.*"
     paths-ignore:
     - '*.{txt,md}'
     - 'Tools/**'
@@ -34,12 +34,12 @@ jobs:
 
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: recursive
 
     - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@v1
+      uses: microsoft/setup-msbuild@v1.1
 
     - name: Build Windows
       working-directory: ${{ env.GITHUB_WORKSPACE }}
@@ -63,20 +63,20 @@ jobs:
       run: cp Windows/Release/*.exe ppsspp/
 
     - name: Upload build
-      uses: actions/upload-artifact@v1
+      uses: actions/upload-artifact@v3
       with:
         name: Windows ${{ matrix.platform }} build
         path: ppsspp/
 
   build-uwp:
-    runs-on: windows-latest
+    runs-on: windows-2019
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: recursive
 
     - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@v1
+      uses: microsoft/setup-msbuild@v1.1
 
     - name: Build UWP
       working-directory: ${{ env.GITHUB_WORKSPACE }}
@@ -87,7 +87,7 @@ jobs:
     needs: build-windows
     timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: false
 
@@ -97,14 +97,18 @@ jobs:
       run: git submodule update --init pspautotests assets/lang
 
     - name: Download build
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v3
       with:
         name: Windows x64 build
         path: ppsspp/
 
-    - name: Execute tests
+    - name: Execute unit tests
       working-directory: ${{ env.GITHUB_WORKSPACE }}
-      run: python test.py --graphics=software
+      run: ppsspp\\UnitTest.exe ALL
+
+    - name: Execute headless tests
+      working-directory: ${{ env.GITHUB_WORKSPACE }}
+      run: python test.py -g --graphics=software
 
   build:
     strategy:
@@ -115,68 +119,92 @@ jobs:
           extra: test
           cc: clang
           cxx: clang++
-          args: ./b.sh --headless
+          args: ./b.sh --headless --unittest
+          id: clang-normal
         - os: ubuntu-latest
           cc: gcc
           cxx: g++
-          args: ./b.sh --headless
+          args: ./b.sh --headless --unittest
+          id: gcc-normal
 
         - os: ubuntu-latest
           extra: android
           cc: clang
           cxx: clang++
           args: cd android && ./ab.sh -j2 APP_ABI=arm64-v8a UNITTEST=1 HEADLESS=1
+          id: android-arm64
         - os: ubuntu-latest
           extra: android
           cc: clang
           cxx: clang++
           args: cd android && ./ab.sh -j2 APP_ABI=armeabi-v7a UNITTEST=1 HEADLESS=1
+          id: android-arm32
         - os: ubuntu-latest
           extra: android
           cc: clang
           cxx: clang++
           args: cd android && ./ab.sh -j2 APP_ABI=x86 UNITTEST=1 HEADLESS=1
+          id: android-x86_32
         - os: ubuntu-latest
           extra: android
           cc: clang
           cxx: clang++
           args: cd android && ./ab.sh -j2 APP_ABI=x86_64 UNITTEST=1 HEADLESS=1
+          id: android-x86_64
+        - os: ubuntu-latest
+          extra: android
+          cc: clang
+          cxx: clang++
+          args: cd android && ./ab.sh -j2 APP_ABI=arm64-v8a OPENXR=1 OPENXR_PLATFORM_QUEST=1
+          id: android-vr-quest
+        - os: ubuntu-latest
+          extra: android
+          cc: clang
+          cxx: clang++
+          args: cd android && ./ab.sh -j2 APP_ABI=arm64-v8a OPENXR=1 OPENXR_PLATFORM_PICO=1
+          id: android-vr-pico
         - os: ubuntu-latest
           extra: android
           cc: clang
           cxx: clang++
           args: ./b.sh --libretro_android ppsspp_libretro
+          id: android-libretro
 
         - os: ubuntu-latest
           extra: qt
           cc: gcc
           cxx: g++
           args: ./b.sh --qt
+          id: qt
         - os: ubuntu-latest
           extra: libretro
           cc: gcc
           cxx: g++
-          args: ./b.sh --libretro
+          args: make -C libretro -f Makefile -j2
+          id: gcc-libretro
         - os: ubuntu-latest
           extra: libretro
           cc: clang
           cxx: clang++
-          args: ./b.sh --libretro
+          args: make -C libretro -f Makefile -j2
+          id: clang-libretro
 
         - os: macos-latest
           extra: test
           cc: clang
           cxx: clang++
-          args: ./b.sh --headless --fat --no-png --no-sdl2
+          args: ./b.sh --headless --unittest --fat --no-png --no-sdl2
+          id: macos
         - os: macos-latest
           extra: ios
           cc: clang
           cxx: clang++
           args: ./b.sh --ios
+          id: ios
 
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: recursive
 
@@ -184,27 +212,19 @@ jobs:
       if: runner.os == 'macOS'
       # This is required for git describe --always to work for git-version.cpp.
       run: |
-        git fetch --deepen=15000 --tags || exit 0
-
-    - name: Cache Qt
-      uses: actions/cache@v1
-      if: matrix.extra == 'qt'
-      id: cache-qt
-      with:
-        path: ${{ runner.workspace }}/Qt
-        key: ${{ runner.os }}-QtCache
+        git fetch --deepen=15000 --no-recurse-submodules --tags || exit 0
 
     - name: Install Qt
-      uses: jurplel/install-qt-action@v2
+      uses: jurplel/install-qt-action@v3
       if: matrix.extra == 'qt'
       with:
-        cached: ${{ steps.cache-qt.outputs.cache-hit }}
+        cache: true
 
     - uses: nttld/setup-ndk@v1
       if: matrix.extra == 'android'
       id: setup-ndk
       with:
-        ndk-version: r21d
+        ndk-version: r21e
 
     - name: Install Linux dependencies
       if: runner.os == 'Linux' && matrix.extra != 'android'
@@ -219,12 +239,32 @@ jobs:
         echo "const char *PPSSPP_GIT_VERSION = \"${GITHUB_REF##*/}\";" > git-version.cpp
         echo "#define PPSSPP_GIT_VERSION_NO_UPDATE 1" >> git-version.cpp
 
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ matrix.id }}
+
     - name: Execute build
       env:
         CC: ${{ matrix.cc }}
         CXX: ${{ matrix.cxx }}
         NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-      run: ${{ matrix.args }}
+        NDK_CCACHE: ccache
+        USE_CCACHE: 1
+      run: |
+        export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+        export CCACHE_SLOPPINESS=clang_index_store,ivfsoverlay,include_file_ctime,include_file_mtime,modules,system_headers,time_macros
+        if [ "${{ matrix.extra }}" == "android" ]; then
+          export CCACHE_FILECLONE=true
+          export CCACHE_DEPEND=true
+          export CCACHE_COMPILERCHECK=content
+        elif [ "$RUNNER_OS" == "macOS" ]; then
+          export CCACHE_SLOPPINESS=pch_defines,$CCACHE_SLOPPINESS
+          export CCACHE_FILECLONE=true
+          export CCACHE_DEPEND=true
+          export CCACHE_COMPILERCHECK=content
+        fi
+        ${{ matrix.args }}
 
     - name: Package build
       if: matrix.extra == 'test'
@@ -248,9 +288,14 @@ jobs:
         elif [ -e build*/PPSSPPHeadless ]; then
           cp build*/PPSSPPHeadless ppsspp/
         fi
+        if [ -e build*/$BUILD_CONFIGURATION/PPSSPPUnitTest ]; then
+          cp build*/$BUILD_CONFIGURATION/PPSSPPUnitTest ppsspp/
+        elif [ -e build*/PPSSPPUnitTest ]; then
+          cp build*/PPSSPPUnitTest ppsspp/
+        fi
 
     - name: Upload build
-      uses: actions/upload-artifact@v1
+      uses: actions/upload-artifact@v3
       if: matrix.extra == 'test'
       with:
         name: ${{ matrix.os }} build
@@ -284,7 +329,7 @@ jobs:
     needs: build
     timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: false
 
@@ -306,7 +351,7 @@ jobs:
         git submodule update --init SDL/macOS
 
     - name: Download build
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v3
       with:
         name: ${{ matrix.os }} build
         path: ppsspp/
@@ -317,7 +362,13 @@ jobs:
       run: |
         cp `find . -name PPSSPPHeadless` .
         chmod +x PPSSPPHeadless
+        cp `find . -name PPSSPPUnitTest` .
+        chmod +x PPSSPPUnitTest
 
-    - name: Execute tests
+    - name: Execute unit tests
       working-directory: ${{ env.GITHUB_WORKSPACE }}
-      run: python test.py --graphics=software
+      run: ./PPSSPPUnitTest ALL
+
+    - name: Execute headless tests
+      working-directory: ${{ env.GITHUB_WORKSPACE }}
+      run: python test.py -g --graphics=software

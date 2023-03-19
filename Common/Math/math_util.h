@@ -28,6 +28,7 @@ inline bool isPowerOf2(int n) {
 	return n == 1 || (n & (n - 1)) == 0;
 }
 
+// Next power of 2.
 inline uint32_t RoundUpToPowerOf2(uint32_t v) {
 	v--;
 	v |= v >> 1;
@@ -37,6 +38,10 @@ inline uint32_t RoundUpToPowerOf2(uint32_t v) {
 	v |= v >> 16;
 	v++;
 	return v;
+}
+
+inline uint32_t RoundUpToPowerOf2(uint32_t v, uint32_t power) {
+	return (v + power - 1) & ~(power - 1);
 }
 
 inline uint32_t log2i(uint32_t val) {

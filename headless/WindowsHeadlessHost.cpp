@@ -23,7 +23,7 @@
 #include "Common/GPU/OpenGL/GLCommon.h"
 #include "Common/GPU/OpenGL/GLFeatures.h"
 #include "Common/File/VFS/VFS.h"
-#include "Common/File/VFS/AssetReader.h"
+#include "Common/File/VFS/DirectoryReader.h"
 
 #include "Common/CommonWindows.h"
 #include "Common/Log.h"
@@ -64,15 +64,6 @@ HWND CreateHiddenWindow() {
 
 	DWORD style = WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_POPUP;
 	return CreateWindowEx(0, L"PPSSPPHeadless", L"PPSSPPHeadless", style, CW_USEDEFAULT, CW_USEDEFAULT, WINDOW_WIDTH, WINDOW_HEIGHT, NULL, NULL, NULL, NULL);
-}
-
-void WindowsHeadlessHost::LoadNativeAssets()
-{
-	VFSRegister("", new DirectoryAssetReader(Path("assets")));
-	VFSRegister("", new DirectoryAssetReader(Path("")));
-	VFSRegister("", new DirectoryAssetReader(Path("..")));
-	VFSRegister("", new DirectoryAssetReader(Path("../Windows/assets")));
-	VFSRegister("", new DirectoryAssetReader(Path("../Windows")));
 }
 
 void WindowsHeadlessHost::SendDebugOutput(const std::string &output)
@@ -150,8 +141,6 @@ bool WindowsHeadlessHost::InitGraphics(std::string *error_message, GraphicsConte
 		});
 		th.detach();
 	}
-
-	LoadNativeAssets();
 
 	if (needRenderThread) {
 		threadState_ = RenderThreadState::START_REQUESTED;

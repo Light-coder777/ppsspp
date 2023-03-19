@@ -22,6 +22,7 @@
 #include "Common/CommonTypes.h"
 #include "Core/Core.h"
 #include "GPU/Common/GPUDebugInterface.h"
+#include "GPU/GPUState.h"
 
 namespace GPUStepping {
 	// Should be called from the emu thread.
@@ -35,10 +36,13 @@ namespace GPUStepping {
 	bool GPU_GetCurrentFramebuffer(const GPUDebugBuffer *&buffer, GPUDebugFramebufferType type);
 	bool GPU_GetCurrentDepthbuffer(const GPUDebugBuffer *&buffer);
 	bool GPU_GetCurrentStencilbuffer(const GPUDebugBuffer *&buffer);
-	bool GPU_GetCurrentTexture(const GPUDebugBuffer *&buffer, int level);
+	bool GPU_GetCurrentTexture(const GPUDebugBuffer *&buffer, int level, bool *isFramebuffer);
 	bool GPU_GetCurrentClut(const GPUDebugBuffer *&buffer);
 	bool GPU_SetCmdValue(u32 op);
+	bool GPU_FlushDrawing();
 
 	void ResumeFromStepping();
 	void ForceUnpause();
+
+	GPUgstate LastState();
 };

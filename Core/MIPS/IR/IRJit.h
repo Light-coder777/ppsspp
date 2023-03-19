@@ -20,7 +20,7 @@
 #include <cstring>
 #include <unordered_map>
 
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 #include "Common/CPUDetect.h"
 #include "Core/MIPS/JitCommon/JitBlockCache.h"
 #include "Core/MIPS/JitCommon/JitCommon.h"
@@ -136,7 +136,7 @@ private:
 class IRJit : public JitInterface {
 public:
 	IRJit(MIPSState *mipsState);
-	virtual ~IRJit();
+	~IRJit();
 
 	void DoState(PointerWrap &p) override;
 

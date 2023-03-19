@@ -23,7 +23,23 @@
 
 #include "GPU/ge_constants.h"
 
-#define SOFTPIXEL_USE_CACHE 1
+// 0-10 match GEBlendSrcFactor/GEBlendDstFactor.
+enum class PixelBlendFactor {
+	OTHERCOLOR,
+	INVOTHERCOLOR,
+	SRCALPHA,
+	INVSRCALPHA,
+	DSTALPHA,
+	INVDSTALPHA,
+	DOUBLESRCALPHA,
+	DOUBLEINVSRCALPHA,
+	DOUBLEDSTALPHA,
+	DOUBLEINVDSTALPHA,
+	FIX,
+	// These are invented, but common FIX values.
+	ZERO,
+	ONE,
+};
 
 #pragma pack(push, 1)
 
@@ -31,13 +47,25 @@ struct PixelFuncID {
 	PixelFuncID() {
 	}
 
-#ifdef SOFTPIXEL_USE_CACHE
 	struct {
 		// Warning: these are not hashed or compared for equal.  Just cached values.
 		uint32_t colorWriteMask{};
 		int8_t ditherMatrix[16]{};
+		uint32_t fogColor;
+		int minz;
+		int maxz;
+		uint16_t framebufStride;
+		uint16_t depthbufStride;
+		GELogicOp logicOp;
+		uint8_t stencilRef;
+		uint8_t stencilTestMask;
+		uint8_t alphaTestMask;
+		GEComparison colorTestFunc;
+		uint32_t colorTestMask;
+		uint32_t colorTestRef;
+		uint32_t alphaBlendSrc;
+		uint32_t alphaBlendDst;
 	} cached;
-#endif
 
 	union {
 		uint64_t fullKey{};
@@ -79,7 +107,8 @@ struct PixelFuncID {
 			uint8_t sFail : 3;
 			uint8_t zFail : 3;
 			uint8_t zPass : 3;
-			// 60 bits, 4 free.
+			bool earlyZChecks : 1;
+			// 61 bits, 3 free.
 		};
 	};
 
@@ -110,11 +139,11 @@ struct PixelFuncID {
 	GEBlendMode AlphaBlendEq() const {
 		return GEBlendMode(alphaBlendEq);
 	}
-	GEBlendSrcFactor AlphaBlendSrc() const {
-		return GEBlendSrcFactor(alphaBlendSrc);
+	PixelBlendFactor AlphaBlendSrc() const {
+		return PixelBlendFactor(alphaBlendSrc);
 	}
-	GEBlendDstFactor AlphaBlendDst() const {
-		return GEBlendDstFactor(alphaBlendDst);
+	PixelBlendFactor AlphaBlendDst() const {
+		return PixelBlendFactor(alphaBlendDst);
 	}
 
 	GEStencilOp SFail() const {
@@ -138,19 +167,45 @@ struct SamplerID {
 	SamplerID() : fullKey(0) {
 	}
 
+	struct {
+		struct {
+			uint16_t w;
+			uint16_t h;
+		} sizes[8];
+		uint32_t texBlendColor;
+		uint32_t clutFormat;
+		union {
+			const uint8_t *clut;
+			const uint16_t *clut16;
+			const uint32_t *clut32;
+		};
+	} cached;
+
+	uint32_t pad;
+
 	union {
 		uint32_t fullKey;
 		struct {
 			uint8_t texfmt : 4;
 			uint8_t clutfmt : 2;
-			uint8_t : 2;
+			bool clampS : 1;
+			bool clampT : 1;
 			bool swizzle : 1;
 			bool useSharedClut : 1;
 			bool hasClutMask : 1;
 			bool hasClutShift : 1;
 			bool hasClutOffset : 1;
 			bool hasInvalidPtr : 1;
+			bool overReadSafe : 1;
+			bool useStandardBufw : 1;
+			uint8_t width0Shift : 4;
+			uint8_t height0Shift : 4;
+			uint8_t texFunc : 3;
+			bool useTextureAlpha : 1;
+			bool useColorDoubling : 1;
+			bool hasAnyMips : 1;
 			bool linear : 1;
+			bool fetch : 1;
 		};
 	};
 
@@ -160,6 +215,10 @@ struct SamplerID {
 
 	GEPaletteFormat ClutFmt() const {
 		return GEPaletteFormat(clutfmt);
+	}
+
+	GETexFunc TexFunc() const {
+		return GETexFunc(texFunc);
 	}
 
 	bool operator == (const SamplerID &other) const {
@@ -187,3 +246,6 @@ struct hash<SamplerID> {
 
 void ComputePixelFuncID(PixelFuncID *id);
 std::string DescribePixelFuncID(const PixelFuncID &id);
+
+void ComputeSamplerID(SamplerID *id);
+std::string DescribeSamplerID(const SamplerID &id);

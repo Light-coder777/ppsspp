@@ -36,7 +36,7 @@ static int CommonDecompress(int windowBits, u32 OutBuffer, int OutBufferLength, 
 	}
 
 	z_stream stream{};
-	u8 *outBufferPtr = Memory::GetPointer(OutBuffer);
+	u8 *outBufferPtr = Memory::GetPointerWrite(OutBuffer);
 	stream.next_in = (Bytef*)Memory::GetPointer(InBuffer);
 	// We don't know the available length, just let it use as much as it wants.
 	stream.avail_in = (uInt)Memory::ValidSize(InBuffer, Memory::g_MemorySize);
@@ -58,9 +58,12 @@ static int CommonDecompress(int windowBits, u32 OutBuffer, int OutBufferLength, 
 		*crc32Addr = crc32(crc, outBufferPtr, stream.total_out);
 	}
 
-	const std::string tag = "sceDeflt/" + GetMemWriteTagAt(InBuffer, stream.total_in);
-	NotifyMemInfo(MemBlockFlags::READ, InBuffer, stream.total_in, tag.c_str(), tag.size());
-	NotifyMemInfo(MemBlockFlags::WRITE, OutBuffer, stream.total_out, tag.c_str(), tag.size());
+	if (MemBlockInfoDetailed(stream.total_in, stream.total_out)) {
+		char tagData[128];
+		size_t tagSize = FormatMemWriteTagAt(tagData, sizeof(tagData), "sceDeflt/", InBuffer, stream.total_in);
+		NotifyMemInfo(MemBlockFlags::READ, InBuffer, stream.total_in, tagData, tagSize);
+		NotifyMemInfo(MemBlockFlags::WRITE, OutBuffer, stream.total_out, tagData, tagSize);
+	}
 
 	return hleLogSuccessI(HLE, stream.total_out);
 }

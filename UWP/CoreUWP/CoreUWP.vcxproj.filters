@@ -62,6 +62,9 @@
     <Filter Include="Ext\disarm">
       <UniqueIdentifier>{e0604f48-5522-43e8-ba22-6d08bc2ccacd}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Ext\riscv-disas">
+      <UniqueIdentifier>{e0604f48-5522-43e8-ba22-6d08bc2ccaee}</UniqueIdentifier>
+    </Filter>
     <Filter Include="MIPS\IR">
       <UniqueIdentifier>{9c6552c2-9858-41da-a920-31ea5628d417}</UniqueIdentifier>
     </Filter>
@@ -105,7 +108,6 @@
     <ClCompile Include="..\..\Core\SaveState.cpp" />
     <ClCompile Include="..\..\Core\Screenshot.cpp" />
     <ClCompile Include="..\..\Core\System.cpp" />
-    <ClCompile Include="..\..\Core\TextureReplacer.cpp" />
     <ClCompile Include="..\..\Core\WaveFile.cpp" />
     <ClCompile Include="..\..\Core\MIPS\ARM\ArmAsm.cpp">
       <Filter>MIPS\ARM</Filter>
@@ -237,9 +239,6 @@
       <Filter>HW</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Core\Util\AudioFormat.cpp">
-      <Filter>Util</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\Core\Util\AudioFormatNEON.cpp">
       <Filter>Util</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Core\Util\BlockAllocator.cpp">
@@ -542,6 +541,9 @@
     <ClCompile Include="..\..\Core\Dialog\PSPNetconfDialog.cpp">
       <Filter>Dialog</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Core\Dialog\PSPNpSigninDialog.cpp">
+      <Filter>Dialog</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Core\Dialog\PSPOskDialog.cpp">
       <Filter>Dialog</Filter>
     </ClCompile>
@@ -607,6 +609,9 @@
     </ClCompile>
     <ClCompile Include="..\..\ext\disarm.cpp">
       <Filter>Ext\disarm</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\ext\riscv-disas.cpp">
+      <Filter>Ext\riscv-disas</Filter>
     </ClCompile>
     <ClCompile Include="..\..\ext\xxhash.c">
       <Filter>Ext</Filter>
@@ -749,6 +754,9 @@
       <Filter>HW</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Core\HW\Camera.cpp">
+      <Filter>HW</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Core\HW\Display.cpp">
       <Filter>HW</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Core\Util\PortManager.cpp">
@@ -1112,6 +1120,10 @@
     <ClCompile Include="..\..\Core\ThreadPools.cpp" />
     <ClCompile Include="..\..\Core\ControlMapper.cpp" />
     <ClCompile Include="..\..\Core\KeyMapDefaults.cpp" />
+    <ClCompile Include="..\..\Core\HLE\sceNp2.cpp">
+      <Filter>HLE</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Core\TiltEventProcessor.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
@@ -1137,7 +1149,6 @@
     <ClInclude Include="..\..\Core\SaveState.h" />
     <ClInclude Include="..\..\Core\Screenshot.h" />
     <ClInclude Include="..\..\Core\System.h" />
-    <ClInclude Include="..\..\Core\TextureReplacer.h" />
     <ClInclude Include="..\..\Core\ThreadEventQueue.h" />
     <ClInclude Include="..\..\Core\WaveFile.h" />
     <ClInclude Include="..\..\Core\MIPS\ARM\ArmCompVFPUNEONUtil.h">
@@ -1225,9 +1236,6 @@
       <Filter>HW</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Core\Util\AudioFormat.h">
-      <Filter>Util</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\Core\Util\AudioFormatNEON.h">
       <Filter>Util</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Core\Util\BlockAllocator.h">
@@ -1542,6 +1550,9 @@
     <ClInclude Include="..\..\Core\Dialog\PSPNetconfDialog.h">
       <Filter>Dialog</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\Core\Dialog\PSPNpSigninDialog.h">
+      <Filter>Dialog</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\Core\Dialog\PSPOskDialog.h">
       <Filter>Dialog</Filter>
     </ClInclude>
@@ -1631,6 +1642,9 @@
     </ClInclude>
     <ClInclude Include="..\..\ext\disarm.h">
       <Filter>Ext\disarm</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\ext\riscv-disas.h">
+      <Filter>Ext\riscv-disas</Filter>
     </ClInclude>
     <ClInclude Include="..\..\ext\xxhash.h">
       <Filter>Ext</Filter>
@@ -1733,6 +1747,9 @@
     <ClInclude Include="..\..\Core\HW\Camera.h">
       <Filter>HW</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\Core\HW\Display.h">
+      <Filter>HW</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\Core\Util\PortManager.h">
       <Filter>Util</Filter>
     </ClInclude>
@@ -1755,6 +1772,10 @@
     <ClInclude Include="..\..\Core\ThreadPools.h" />
     <ClInclude Include="..\..\Core\ControlMapper.h" />
     <ClInclude Include="..\..\Core\KeyMapDefaults.h" />
+    <ClInclude Include="..\..\Core\HLE\sceNp2.h">
+      <Filter>HLE</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Core\TiltEventProcessor.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\ext\gason\LICENSE">

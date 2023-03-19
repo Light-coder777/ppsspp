@@ -2,12 +2,16 @@
 
 #include <cstdint>
 #include <vector>
+#include <set>
 #include <unordered_map>
 
 #include "Common/GPU/OpenGL/GLCommon.h"
+#include "Common/GPU/OpenGL/GLFrameData.h"
 #include "Common/GPU/DataFormat.h"
 #include "Common/GPU/Shader.h"
+#include "Common/GPU/thin3d.h"
 #include "Common/Data/Collections/TinySet.h"
+
 
 struct GLRViewport {
 	float x, y, w, h, minZ, maxZ;
@@ -45,6 +49,7 @@ enum class GLRRenderCommand : uint8_t {
 	UNIFORM4UI,
 	UNIFORM4F,
 	UNIFORMMATRIX,
+	UNIFORMSTEREOMATRIX,
 	TEXTURESAMPLER,
 	TEXTURELOD,
 	VIEWPORT,
@@ -60,7 +65,6 @@ enum class GLRRenderCommand : uint8_t {
 	GENMIPS,
 	DRAW,
 	DRAW_INDEXED,
-	PUSH_CONSTANTS,
 	TEXTURE_SUBIMAGE,
 };
 
@@ -126,7 +130,7 @@ struct GLRRenderData {
 		struct {
 			const char *name;  // if null, use loc
 			const GLint *loc;
-			float m[16];
+			float m[32];
 		} uniformMatrix4;
 		struct {
 			uint32_t clearColor;
@@ -146,11 +150,12 @@ struct GLRRenderData {
 		struct {
 			GLRTexture *texture;
 			Draw::DataFormat format;
-			int level;
-			int x;
-			int y;
-			int width;
-			int height;
+			uint8_t slot;
+			uint8_t level;
+			uint16_t width;
+			uint16_t height;
+			uint16_t x;
+			uint16_t y;
 			GLRAllocType allocType;
 			uint8_t *data;  // owned, delete[]-d
 		} texture_subimage;
@@ -259,15 +264,16 @@ struct GLRInitStep {
 			GLRTexture *texture;
 			Draw::DataFormat format;
 			int level;
-			int width;
-			int height;
+			uint16_t width;
+			uint16_t height;
+			uint16_t depth;
 			GLRAllocType allocType;
 			bool linearFilter;
 			uint8_t *data;  // owned, delete[]-d
 		} texture_image;
 		struct {
 			GLRTexture *texture;
-			int maxLevel;
+			int loadedLevels;
 			bool genMips;
 		} texture_finalize;
 	};
@@ -349,19 +355,18 @@ public:
 		errorCallbackUserData_ = userdata;
 	}
 
+	void SetDeviceCaps(const Draw::DeviceCaps &caps) {
+		caps_ = caps;
+	}
+
 	void RunInitSteps(const std::vector<GLRInitStep> &steps, bool skipGLCalls);
 
-	void RunSteps(const std::vector<GLRStep *> &steps, bool skipGLCalls);
-	void LogSteps(const std::vector<GLRStep *> &steps);
+	void RunSteps(const std::vector<GLRStep *> &steps, bool skipGLCalls, bool keepSteps, bool useVR);
 
 	void CreateDeviceObjects();
 	void DestroyDeviceObjects();
 
-	inline int RPIndex(GLRRenderPassAction color, GLRRenderPassAction depth) {
-		return (int)depth * 3 + (int)color;
-	}
-
-	void CopyReadbackBuffer(int width, int height, Draw::DataFormat srcFormat, Draw::DataFormat destFormat, int pixelStride, uint8_t *pixels);
+	void CopyFromReadbackBuffer(GLRFramebuffer *framebuffer, int width, int height, Draw::DataFormat srcFormat, Draw::DataFormat destFormat, int pixelStride, uint8_t *pixels);
 
 	void Resize(int width, int height) {
 		targetWidth_ = width;
@@ -387,14 +392,6 @@ private:
 	void PerformReadback(const GLRStep &pass);
 	void PerformReadbackImage(const GLRStep &pass);
 
-	void LogRenderPass(const GLRStep &pass);
-	void LogCopy(const GLRStep &pass);
-	void LogBlit(const GLRStep &pass);
-	void LogReadback(const GLRStep &pass);
-	void LogReadbackImage(const GLRStep &pass);
-
-	void ResizeReadbackBuffer(size_t requiredSize);
-
 	void fbo_ext_create(const GLRInitStep &step);
 	void fbo_bind_fb_target(bool read, GLuint name);
 	GLenum fbo_get_fb_target(bool read, GLuint **cached);
@@ -403,6 +400,8 @@ private:
 	GLRFramebuffer *curFB_ = nullptr;
 
 	GLuint globalVAO_ = 0;
+
+	Draw::DeviceCaps caps_{};  // For sanity checks.
 
 	int curFBWidth_ = 0;
 	int curFBHeight_ = 0;
@@ -413,9 +412,7 @@ private:
 	// We size it generously.
 	uint8_t *readbackBuffer_ = nullptr;
 	int readbackBufferSize_ = 0;
-	// Temp buffer for color conversion
-	uint8_t *tempBuffer_ = nullptr;
-	int tempBufferSize_ = 0;
+	uint32_t readbackAspectMask_ = 0;
 
 	float maxAnisotropyLevel_ = 0.0f;
 

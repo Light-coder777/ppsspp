@@ -49,10 +49,15 @@ static int __DmacMemcpy(u32 dst, u32 src, u32 size) {
 	if (Memory::IsVRAMAddress(src) || Memory::IsVRAMAddress(dst)) {
 		skip = gpu->PerformMemoryCopy(dst, src, size);
 	}
-	if (!skip) {
+	if (!skip && size != 0) {
 		currentMIPS->InvalidateICache(src, size);
-		const std::string tag = "DmacMemcpy/" + GetMemWriteTagAt(src, size);
-		Memory::Memcpy(dst, src, size, tag.c_str(), tag.size());
+		if (MemBlockInfoDetailed(size)) {
+			char tagData[128];
+			size_t tagSize = FormatMemWriteTagAt(tagData, sizeof(tagData), "DmacMemcpy/", src, size);
+			Memory::Memcpy(dst, src, size, tagData, tagSize);
+		} else {
+			Memory::Memcpy(dst, src, size, "DmacMemcpy");
+		}
 		currentMIPS->InvalidateICache(dst, size);
 	}
 

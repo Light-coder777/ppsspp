@@ -19,7 +19,7 @@ private:
 	HWND memViewHdl, symListHdl, editWnd, searchBoxHdl, srcListHdl;
 	HWND layerDropdown_;
 	HWND status_;
-	BOOL DlgProc(UINT message, WPARAM wParam, LPARAM lParam);
+	BOOL DlgProc(UINT message, WPARAM wParam, LPARAM lParam) override;
 
 public:
 	int index; //helper 
@@ -33,12 +33,13 @@ public:
 	~CMemoryDlg(void);
 	
 	void Goto(u32 addr);
-	void Update(void);	
+	void Update(void) override;
 	void NotifyMapLoaded();
 
-	void NotifySearchCompleted();
-
 	void Size(void);
+
+private:
+	bool mapLoadPending_ = false;
 };
 
 

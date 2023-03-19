@@ -18,6 +18,7 @@ SDLJoystick *joystick = NULL;
 #include <atomic>
 #include <algorithm>
 #include <cmath>
+#include <csignal>
 #include <thread>
 #include <locale>
 
@@ -57,6 +58,9 @@ SDLJoystick *joystick = NULL;
 #include "SDLGLGraphicsContext.h"
 #include "SDLVulkanGraphicsContext.h"
 
+#if PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
+#include "UI/DarwinFileSystemServices.h"
+#endif
 
 GlobalUIState lastUIState = UISTATE_MENU;
 GlobalUIState GetUIState();
@@ -98,7 +102,7 @@ static void InitSDLAudioDevice(const std::string &name = "") {
 	fmt.freq = 44100;
 	fmt.format = AUDIO_S16;
 	fmt.channels = 2;
-	fmt.samples = 1024;
+	fmt.samples = 256;
 	fmt.callback = &sdl_mixaudio_callback;
 	fmt.userdata = nullptr;
 
@@ -145,7 +149,7 @@ static void StopSDLAudioDevice() {
 // Simple implementations of System functions
 
 
-void SystemToast(const char *text) {
+void System_Toast(const char *text) {
 #ifdef _WIN32
 	std::wstring str = ConvertUTF8ToWString(text);
 	MessageBox(0, str.c_str(), L"Toast!", MB_ICONINFORMATION);
@@ -184,7 +188,18 @@ void System_SendMessage(const char *command, const char *parameter) {
 	} else if (!strcmp(command, "audio_resetDevice")) {
 		StopSDLAudioDevice();
 		InitSDLAudioDevice();
-	}
+    }
+#if PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
+    else if (!strcmp(command, "browse_folder")) {
+        DarwinDirectoryPanelCallback callback = [] (Path thePathChosen) {
+            NativeMessageReceived("browse_folder", thePathChosen.c_str());
+        };
+        
+        DarwinFileSystemServices services;
+        services.presentDirectoryPanel(callback, /* allowFiles = */ true, /* allowDirectorites = */ true);
+    }
+#endif
+    
 }
 
 void System_AskForPermission(SystemPermission permission) {}
@@ -375,6 +390,22 @@ int System_GetPropertyInt(SystemProperty prop) {
 #endif
 	case SYSPROP_DISPLAY_COUNT:
 		return SDL_GetNumVideoDisplays();
+	case SYSPROP_KEYBOARD_LAYOUT:
+	{
+		char q, w, y;
+		q = SDL_GetKeyFromScancode(SDL_SCANCODE_Q);
+		w = SDL_GetKeyFromScancode(SDL_SCANCODE_W);
+		y = SDL_GetKeyFromScancode(SDL_SCANCODE_Y);
+		if (q == 'a' && w == 'z' && y == 'y')
+			return KEYBOARD_LAYOUT_AZERTY;
+		else if (q == 'q' && w == 'w' && y == 'z')
+			return KEYBOARD_LAYOUT_QWERTZ;
+		return KEYBOARD_LAYOUT_QWERTY;
+	}
+	case SYSPROP_DISPLAY_XRES:
+		return g_DesktopWidth;
+	case SYSPROP_DISPLAY_YRES:
+		return g_DesktopHeight;
 	default:
 		return -1;
 	}
@@ -406,6 +437,9 @@ bool System_GetPropertyBool(SystemProperty prop) {
 #endif
 	case SYSPROP_CAN_JIT:
 		return true;
+	case SYSPROP_SUPPORTS_OPEN_FILE_IN_EDITOR:
+		return true;  // FileUtil.cpp: OpenFileInEditor
+
 	default:
 		return false;
 	}
@@ -507,6 +541,11 @@ int main(int argc, char *argv[]) {
 #ifdef HAVE_LIBNX
 	socketInitializeDefault();
 	nxlinkStdio();
+#else // HAVE_LIBNX
+	// Ignore sigpipe.
+	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+		perror("Unable to ignore SIGPIPE");
+	}
 #endif // HAVE_LIBNX
 
 	PROFILE_INIT();
@@ -544,9 +583,10 @@ int main(int argc, char *argv[]) {
 
 	Uint32 mode = 0;
 	for (int i = 1; i < argc; i++) {
-		if (!strcmp(argv[i],"--fullscreen"))
+		if (!strcmp(argv[i],"--fullscreen")) {
 			mode |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-		else if (set_xres == -2)
+			g_Config.iForceFullScreen = 1;
+		} else if (set_xres == -2)
 			set_xres = parseInt(argv[i]);
 		else if (set_yres == -2)
 			set_yres = parseInt(argv[i]);
@@ -630,42 +670,44 @@ int main(int argc, char *argv[]) {
 #endif
 
 	if (mode & SDL_WINDOW_FULLSCREEN_DESKTOP) {
-		pixel_xres = g_DesktopWidth;
-		pixel_yres = g_DesktopHeight;
-		g_Config.bFullScreen = true;
+		g_display.pixel_xres = g_DesktopWidth;
+		g_display.pixel_yres = g_DesktopHeight;
+		if (g_Config.iForceFullScreen == -1)
+			g_Config.bFullScreen = true;
 	} else {
 		// set a sensible default resolution (2x)
-		pixel_xres = 480 * 2 * set_scale;
-		pixel_yres = 272 * 2 * set_scale;
+		g_display.pixel_xres = 480 * 2 * set_scale;
+		g_display.pixel_yres = 272 * 2 * set_scale;
 		if (portrait) {
-			std::swap(pixel_xres, pixel_yres);
+			std::swap(g_display.pixel_xres, g_display.pixel_yres);
 		}
-		g_Config.bFullScreen = false;
+		if (g_Config.iForceFullScreen == -1)
+			g_Config.bFullScreen = false;
 	}
 
 	set_dpi = 1.0f / set_dpi;
 
 	if (set_ipad) {
-		pixel_xres = 1024;
-		pixel_yres = 768;
+		g_display.pixel_xres = 1024;
+		g_display.pixel_yres = 768;
 	}
 	if (!landscape) {
-		std::swap(pixel_xres, pixel_yres);
+		std::swap(g_display.pixel_xres, g_display.pixel_yres);
 	}
 
 	if (set_xres > 0) {
-		pixel_xres = set_xres;
+		g_display.pixel_xres = set_xres;
 	}
 	if (set_yres > 0) {
-		pixel_yres = set_yres;
+		g_display.pixel_yres = set_yres;
 	}
 	float dpi_scale = 1.0f;
 	if (set_dpi > 0) {
 		dpi_scale = set_dpi;
 	}
 
-	dp_xres = (float)pixel_xres * dpi_scale;
-	dp_yres = (float)pixel_yres * dpi_scale;
+	g_display.dp_xres = (float)g_display.pixel_xres * dpi_scale;
+	g_display.dp_yres = (float)g_display.pixel_yres * dpi_scale;
 
 	// Mac / Linux
 	char path[2048];
@@ -697,21 +739,19 @@ int main(int argc, char *argv[]) {
 	NativeInit(remain_argc, (const char **)remain_argv, path, external_dir, nullptr);
 
 	// Use the setting from the config when initing the window.
-	if (g_Config.bFullScreen)
+	if (g_Config.UseFullScreen())
 		mode |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 
 	int x = SDL_WINDOWPOS_UNDEFINED_DISPLAY(getDisplayNumber());
 	int y = SDL_WINDOWPOS_UNDEFINED;
 
-	pixel_in_dps_x = (float)pixel_xres / dp_xres;
-	pixel_in_dps_y = (float)pixel_yres / dp_yres;
-	g_dpi_scale_x = dp_xres / (float)pixel_xres;
-	g_dpi_scale_y = dp_yres / (float)pixel_yres;
-	g_dpi_scale_real_x = g_dpi_scale_x;
-	g_dpi_scale_real_y = g_dpi_scale_y;
-
-	printf("Pixels: %i x %i\n", pixel_xres, pixel_yres);
-	printf("Virtual pixels: %i x %i\n", dp_xres, dp_yres);
+	g_display.pixel_in_dps_x = (float)g_display.pixel_xres / g_display.dp_xres;
+	g_display.pixel_in_dps_y = (float)g_display.pixel_yres / g_display.dp_yres;
+	g_display.dpi_scale_x = g_display.dp_xres / (float)g_display.pixel_xres;
+	g_display.dpi_scale_y = g_display.dp_yres / (float)g_display.pixel_yres;
+	g_display.dpi_scale_real_x = g_display.dpi_scale_x;
+	g_display.dpi_scale_real_y = g_display.dpi_scale_y;
+	g_display.Print();
 
 	GraphicsContext *graphicsContext = nullptr;
 	SDL_Window *window = nullptr;
@@ -723,9 +763,10 @@ int main(int argc, char *argv[]) {
 			printf("GL init error '%s'\n", error_message.c_str());
 		}
 		graphicsContext = ctx;
+#if !PPSSPP_PLATFORM(SWITCH)
 	} else if (g_Config.iGPUBackend == (int)GPUBackend::VULKAN) {
 		SDLVulkanGraphicsContext *ctx = new SDLVulkanGraphicsContext();
-		if (!ctx->Init(window, x, y, mode, &error_message)) {
+		if (!ctx->Init(window, x, y, mode | SDL_WINDOW_VULKAN, &error_message)) {
 			printf("Vulkan init error '%s' - falling back to GL\n", error_message.c_str());
 			g_Config.iGPUBackend = (int)GPUBackend::OPENGL;
 			SetGPUBackend((GPUBackend)g_Config.iGPUBackend);
@@ -736,6 +777,7 @@ int main(int argc, char *argv[]) {
 		} else {
 			graphicsContext = ctx;
 		}
+#endif
 	}
 
 	bool useEmuThread = g_Config.iGPUBackend == (int)GPUBackend::OPENGL;
@@ -743,7 +785,13 @@ int main(int argc, char *argv[]) {
 	SDL_SetWindowTitle(window, (app_name_nice + " " + PPSSPP_GIT_VERSION).c_str());
 
 	char iconPath[PATH_MAX];
+#if defined(ASSETS_DIR)
+	snprintf(iconPath, PATH_MAX, "%sicon_regular_72.png", ASSETS_DIR);
+	if (access(iconPath, F_OK) != 0)
+		snprintf(iconPath, PATH_MAX, "%sassets/icon_regular_72.png", SDL_GetBasePath() ? SDL_GetBasePath() : "");
+#else
 	snprintf(iconPath, PATH_MAX, "%sassets/icon_regular_72.png", SDL_GetBasePath() ? SDL_GetBasePath() : "");
+#endif
 	int width = 0, height = 0;
 	unsigned char *imageData;
 	if (pngLoad(iconPath, &width, &height, &imageData) == 1) {
@@ -823,8 +871,8 @@ int main(int argc, char *argv[]) {
 		}
 		SDL_Event event, touchEvent;
 		while (SDL_PollEvent(&event)) {
-			float mx = event.motion.x * g_dpi_scale_x;
-			float my = event.motion.y * g_dpi_scale_y;
+			float mx = event.motion.x * g_display.dpi_scale_x;
+			float my = event.motion.y * g_display.dpi_scale_y;
 
 			switch (event.type) {
 			case SDL_QUIT:
@@ -849,7 +897,10 @@ int main(int argc, char *argv[]) {
 					UpdateScreenScale(new_width, new_height);
 
 					// Set variable here in case fullscreen was toggled by hotkey
-					g_Config.bFullScreen = fullscreen;
+					if (g_Config.UseFullScreen() != fullscreen) {
+						g_Config.bFullScreen = fullscreen;
+						g_Config.iForceFullScreen = -1;
+					}
 
 					// Hide/Show cursor correctly toggling fullscreen
 					if (lastUIState == UISTATE_INGAME && fullscreen && !g_Config.bShowTouchControls) {
@@ -972,7 +1023,7 @@ int main(int argc, char *argv[]) {
 				case SDL_BUTTON_LEFT:
 					{
 						mouseDown = true;
-						TouchInput input;
+						TouchInput input{};
 						input.x = mx;
 						input.y = my;
 						input.flags = TOUCH_DOWN | TOUCH_MOUSE;
@@ -1012,20 +1063,21 @@ int main(int argc, char *argv[]) {
 				{
 					KeyInput key;
 					key.deviceId = DEVICE_ID_MOUSE;
+					key.flags = KEY_DOWN;
 					if (event.wheel.y > 0) {
 						key.keyCode = NKCODE_EXT_MOUSEWHEEL_UP;
 						mouseWheelMovedUpFrames = 5;
-					} else {
+						NativeKey(key);
+					} else if (event.wheel.y < 0) {
 						key.keyCode = NKCODE_EXT_MOUSEWHEEL_DOWN;
 						mouseWheelMovedDownFrames = 5;
+						NativeKey(key);
 					}
-					key.flags = KEY_DOWN;
-					NativeKey(key);
+					break;
 				}
-				break;
 			case SDL_MOUSEMOTION:
 				if (mouseDown) {
-					TouchInput input;
+					TouchInput input{};
 					input.x = mx;
 					input.y = my;
 					input.flags = TOUCH_MOVE | TOUCH_MOUSE;
@@ -1040,7 +1092,7 @@ int main(int argc, char *argv[]) {
 				case SDL_BUTTON_LEFT:
 					{
 						mouseDown = false;
-						TouchInput input;
+						TouchInput input{};
 						input.x = mx;
 						input.y = my;
 						input.flags = TOUCH_UP | TOUCH_MOUSE;
@@ -1119,17 +1171,17 @@ int main(int argc, char *argv[]) {
 #if !defined(MOBILE_DEVICE)
 		if (lastUIState != GetUIState()) {
 			lastUIState = GetUIState();
-			if (lastUIState == UISTATE_INGAME && g_Config.bFullScreen && !g_Config.bShowTouchControls)
+			if (lastUIState == UISTATE_INGAME && g_Config.UseFullScreen() && !g_Config.bShowTouchControls)
 				SDL_ShowCursor(SDL_DISABLE);
-			if (lastUIState != UISTATE_INGAME || !g_Config.bFullScreen)
+			if (lastUIState != UISTATE_INGAME || !g_Config.UseFullScreen())
 				SDL_ShowCursor(SDL_ENABLE);
 		}
 #endif
 
 		// Disabled by default, needs a workaround to map to psp keys.
 		if (g_Config.bMouseControl) {
-			float scaleFactor_x = g_dpi_scale_x * 0.1 * g_Config.fMouseSensitivity;
-			float scaleFactor_y = g_dpi_scale_y * 0.1 * g_Config.fMouseSensitivity;
+			float scaleFactor_x = g_display.dpi_scale_x * 0.1 * g_Config.fMouseSensitivity;
+			float scaleFactor_y = g_display.dpi_scale_y * 0.1 * g_Config.fMouseSensitivity;
 
 			AxisInput axisX, axisY;
 			axisX.axisId = JOYSTICK_AXIS_MOUSE_REL_X;
@@ -1214,7 +1266,7 @@ int main(int argc, char *argv[]) {
 #endif
 
 	glslang::FinalizeProcess();
-	printf("Leaving main");
+	printf("Leaving main\n");
 #ifdef HAVE_LIBNX
 	socketExit();
 #endif

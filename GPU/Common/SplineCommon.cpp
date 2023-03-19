@@ -18,10 +18,9 @@
 #include <string.h>
 #include <algorithm>
 
-#include "Common/Profiler/Profiler.h"
-
+#include "Common/Common.h"
 #include "Common/CPUDetect.h"
-
+#include "Common/Profiler/Profiler.h"
 #include "GPU/Common/GPUStateUtils.h"
 #include "GPU/Common/SplineCommon.h"
 #include "GPU/Common/DrawEngineCommon.h"
@@ -321,7 +320,8 @@ ControlPoints::ControlPoints(const SimpleVertex *const *points, int size, Simple
 	pos = (Vec3f *)managedBuf.Allocate(sizeof(Vec3f) * size);
 	tex = (Vec2f *)managedBuf.Allocate(sizeof(Vec2f) * size);
 	col = (Vec4f *)managedBuf.Allocate(sizeof(Vec4f) * size);
-	Convert(points, size);
+	if (pos && tex && col)
+		Convert(points, size);
 }
 
 void ControlPoints::Convert(const SimpleVertex *const *points, int size) {
@@ -507,7 +507,7 @@ void DrawEngineCommon::SubmitCurve(const void *control_points, const void *indic
 	if (indices)
 		GetIndexBounds(indices, num_points, vertType, &index_lower_bound, &index_upper_bound);
 
-	VertexDecoder *origVDecoder = GetVertexDecoder((vertType & 0xFFFFFF) | (gstate.getUVGenMode() << 24));
+	VertexDecoder *origVDecoder = GetVertexDecoder(GetVertTypeID(vertType, gstate.getUVGenMode(), decOptions_.applySkinInDecode));
 	*bytesRead = num_points * origVDecoder->VertexSize();
 
 	// Simplify away bones and morph before proceeding
@@ -554,7 +554,10 @@ void DrawEngineCommon::SubmitCurve(const void *control_points, const void *indic
 		HardwareTessellation(output, surface, origVertType, points, tessDataTransfer);
 	} else {
 		ControlPoints cpoints(points, num_points, managedBuf);
-		SoftwareTessellation(output, surface, origVertType, cpoints);
+		if (cpoints.IsValid())
+			SoftwareTessellation(output, surface, origVertType, cpoints);
+		else
+			ERROR_LOG(G3D, "Failed to allocate space for control point values, skipping curve draw");
 	}
 
 	u32 vertTypeWithIndex16 = (vertType & ~GE_VTYPE_IDX_MASK) | GE_VTYPE_IDX_16BIT;
@@ -569,11 +572,13 @@ void DrawEngineCommon::SubmitCurve(const void *control_points, const void *indic
 		gstate_c.uv.vOff = 0;
 	}
 
-	uint32_t vertTypeID = GetVertTypeID(vertTypeWithIndex16, gstate.getUVGenMode());
+	uint32_t vertTypeID = GetVertTypeID(vertTypeWithIndex16, gstate.getUVGenMode(), decOptions_.applySkinInDecode);
 	int generatedBytesRead;
-	DispatchSubmitPrim(output.vertices, output.indices, PatchPrimToPrim(surface.primType), output.count, vertTypeID, gstate.getCullMode(), &generatedBytesRead);
+	if (output.count)
+		DispatchSubmitPrim(output.vertices, output.indices, PatchPrimToPrim(surface.primType), output.count, vertTypeID, gstate.getCullMode(), &generatedBytesRead);
 
-	DispatchFlush();
+	if (flushOnParams_)
+		DispatchFlush();
 
 	if (origVertType & GE_VTYPE_TC_MASK) {
 		gstate_c.uv = prevUVScale;

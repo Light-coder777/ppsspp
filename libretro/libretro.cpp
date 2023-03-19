@@ -21,8 +21,9 @@
 #include "Common/Thread/ThreadUtil.h"
 #include "Common/Thread/ThreadManager.h"
 #include "Common/File/VFS/VFS.h"
-#include "Common/File/VFS/AssetReader.h"
+#include "Common/File/VFS/DirectoryReader.h"
 #include "Common/Data/Text/I18n.h"
+#include "Common/StringUtils.h"
 
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
@@ -34,6 +35,10 @@
 #include "Core/Host.h"
 #include "Core/MemMap.h"
 #include "Core/System.h"
+#include "Core/CoreTiming.h"
+#include "Core/HW/Display.h"
+#include "Core/CwCheat.h"
+#include "Core/ELF/ParamSFO.h"
 
 #include "GPU/GPUState.h"
 #include "GPU/GPUInterface.h"
@@ -43,6 +48,7 @@
 
 #include "libretro/libretro.h"
 #include "libretro/LibretroGraphicsContext.h"
+#include "libretro/libretro_core_options.h"
 
 #if PPSSPP_PLATFORM(ANDROID)
 #include <sys/system_properties.h>
@@ -55,6 +61,10 @@
 #define DIR_SEP_CHRS "/"
 #endif
 
+#ifdef HAVE_LIBRETRO_VFS
+#include "streams/file_stream.h"
+#endif
+
 #define SAMPLERATE 44100
 
 #define AUDIO_RING_BUFFER_SIZE      (1 << 16)
@@ -63,12 +73,27 @@
 // to calculating the average for the last 180
 // frames, or 3 seconds of runtime...
 #define AUDIO_FRAMES_MOVING_AVG_ALPHA (1.0f / 180.0f)
-// Workaround for a RetroArch audio driver
-// limitation: a maximum of 1024 frames
-// can be written per call of audio_batch_cb()
-#define AUDIO_BATCH_FRAMES_MAX 1024
+
+// Calculated swap interval is 'stable' if the same
+// value is recorded for a number of retro_run()
+// calls equal to VSYNC_SWAP_INTERVAL_FRAMES
+#define VSYNC_SWAP_INTERVAL_FRAMES 6
+// Calculated swap interval is 'valid' if it is
+// within VSYNC_SWAP_INTERVAL_THRESHOLD of an integer
+// value
+#define VSYNC_SWAP_INTERVAL_THRESHOLD 0.05f
+// Swap interval detection is only enabled if the
+// core is running at 'normal' speed - i.e. if
+// run speed is within VSYNC_SWAP_INTERVAL_RUN_SPEED_THRESHOLD
+// percent of 100
+#define VSYNC_SWAP_INTERVAL_RUN_SPEED_THRESHOLD 5.0f
 
 static bool libretro_supports_bitmasks = false;
+static bool libretro_supports_option_categories = false;
+static bool show_ip_address_options = true;
+static bool show_upnp_port_option = true;
+static bool show_detect_frame_rate_option = true;
+static std::string changeProAdhocServer;
 
 namespace Libretro
 {
@@ -81,6 +106,139 @@ namespace Libretro
 
 namespace Libretro
 {
+   static bool detectVsyncSwapInterval = false;
+   static bool detectVsyncSwapIntervalOptShown = true;
+
+   static s64 expectedTimeUsPerRun = 0;
+   static uint32_t vsyncSwapInterval = 1;
+   static uint32_t vsyncSwapIntervalLast = 1;
+   static uint32_t vsyncSwapIntervalCounter = 0;
+   static int numVBlanksLast = 0;
+   static double fpsTimeLast = 0.0;
+   static float runSpeed = 0.0f;
+   static s64 runTicksLast = 0;
+
+   static void VsyncSwapIntervalReset()
+   {
+      expectedTimeUsPerRun = (s64)(1000000.0f / (60.0f / 1.001f));
+      vsyncSwapInterval = 1;
+      vsyncSwapIntervalLast = 1;
+      vsyncSwapIntervalCounter = 0;
+
+      numVBlanksLast = 0;
+      fpsTimeLast = 0.0;
+      runSpeed = 0.0f;
+      runTicksLast = 0;
+
+      detectVsyncSwapIntervalOptShown = true;
+   }
+
+   static void VsyncSwapIntervalDetect()
+   {
+      if (!detectVsyncSwapInterval)
+         return;
+
+      // All bets are off if core is running at
+      // the 'wrong' speed (i.e. cycle count for
+      // this run will be meaningless if internal
+      // frame rate is dropping below expected
+      // value, or fast forward is enabled)
+      double fpsTime = time_now_d();
+      int numVBlanks = __DisplayGetNumVblanks();
+      int frames = numVBlanks - numVBlanksLast;
+
+      if (frames >= VSYNC_SWAP_INTERVAL_FRAMES << 1)
+      {
+         double fps = (double)frames / (fpsTime - fpsTimeLast);
+         runSpeed = fps / ((60.0f / 1.001f) / 100.0f);
+
+         fpsTimeLast = fpsTime;
+         numVBlanksLast = numVBlanks;
+      }
+
+      float speedDelta = 100.0f - runSpeed;
+      speedDelta = (speedDelta < 0.0f) ? -speedDelta : speedDelta;
+
+      // Speed is measured relative to a 60 Hz refresh
+      // rate. If we are transitioning from a low internal
+      // frame rate to a higher internal frame rate, then
+      // 'full speed' may actually equate to
+      // (100 / current_swap_interval)...
+      if ((vsyncSwapInterval > 1) &&
+          (speedDelta >= VSYNC_SWAP_INTERVAL_RUN_SPEED_THRESHOLD))
+      {
+         speedDelta = 100.0f - (runSpeed * (float)vsyncSwapInterval);
+         speedDelta = (speedDelta < 0.0f) ? -speedDelta : speedDelta;
+      }
+
+      if (speedDelta >= VSYNC_SWAP_INTERVAL_RUN_SPEED_THRESHOLD)
+      {
+         // Swap interval detection is invalid - bail out
+         vsyncSwapIntervalCounter = 0;
+         return;
+      }
+
+      // Get elapsed time (us) for this run
+      s64 runTicks = CoreTiming::GetTicks();
+      s64 runTimeUs = cyclesToUs(runTicks - runTicksLast);
+
+      // Check if current internal frame rate is a
+      // factor of the default ~60 Hz
+      float swapRatio = (float)runTimeUs / (float)expectedTimeUsPerRun;
+      uint32_t swapInteger;
+      float swapRemainder;
+
+      // If internal frame rate is equal to (within threshold)
+      // or higher than the default ~60 Hz, fall back to a
+      // swap interval of 1
+      if (swapRatio < (1.0f + VSYNC_SWAP_INTERVAL_THRESHOLD))
+      {
+         swapInteger = 1;
+         swapRemainder = 0.0f;
+      }
+      else
+      {
+         swapInteger = (uint32_t)(swapRatio + 0.5f);
+         swapRemainder = swapRatio - (float)swapInteger;
+         swapRemainder = (swapRemainder < 0.0f) ?
+               -swapRemainder : swapRemainder;
+      }
+
+      // > Swap interval is considered 'valid' if it is
+      //   within VSYNC_SWAP_INTERVAL_THRESHOLD of an integer
+      //   value
+      // > If valid, check if new swap interval differs from
+      //   previously logged value
+      if ((swapRemainder <= VSYNC_SWAP_INTERVAL_THRESHOLD) &&
+          (swapInteger != vsyncSwapInterval))
+      {
+         vsyncSwapIntervalCounter =
+               (swapInteger == vsyncSwapIntervalLast) ?
+                     (vsyncSwapIntervalCounter + 1) : 0;
+
+         // Check whether swap interval is 'stable'
+         if (vsyncSwapIntervalCounter >= VSYNC_SWAP_INTERVAL_FRAMES)
+         {
+            vsyncSwapInterval = swapInteger;
+            vsyncSwapIntervalCounter = 0;
+
+            // Notify frontend
+            retro_system_av_info avInfo;
+            retro_get_system_av_info(&avInfo);
+            environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avInfo);
+         }
+
+         vsyncSwapIntervalLast = swapInteger;
+      }
+      else
+         vsyncSwapIntervalCounter = 0;
+
+      runTicksLast = runTicks;
+   }
+} // namespace Libretro
+
+namespace Libretro
+{
    static std::mutex audioSampleLock_;
    static int16_t audioRingBuffer[AUDIO_RING_BUFFER_SIZE] = {0};
    static uint32_t audioRingBufferBase = 0;
@@ -89,6 +247,9 @@ namespace Libretro
    static int16_t *audioOutBuffer = NULL;
    static uint32_t audioOutBufferSize = 0;
    static float audioOutFramesAvg = 0.0f;
+   // Set this to an arbitrarily large value,
+   // it will be fine tuned in AudioUploadSamples()
+   static uint32_t audioBatchFramesMax = AUDIO_RING_BUFFER_SIZE >> 1;
 
    static void AudioBufferFlush()
    {
@@ -103,6 +264,7 @@ namespace Libretro
       audioOutFramesAvg = (float)SAMPLERATE / (60.0f / 1.001f);
       audioOutBufferSize = ((uint32_t)audioOutFramesAvg + 1) * 2;
       audioOutBuffer = (int16_t *)malloc(audioOutBufferSize * sizeof(int16_t));
+      audioBatchFramesMax = AUDIO_RING_BUFFER_SIZE >> 1;
 
       AudioBufferFlush();
    }
@@ -114,6 +276,7 @@ namespace Libretro
       audioOutBuffer = NULL;
       audioOutBufferSize = 0;
       audioOutFramesAvg = 0.0f;
+      audioBatchFramesMax = AUDIO_RING_BUFFER_SIZE >> 1;
 
       AudioBufferFlush();
    }
@@ -166,34 +329,15 @@ namespace Libretro
 
    static void AudioUploadSamples()
    {
-      // This is a gruesome hack...
-      // - The core specifies a fixed frame rate of (60.0f / 1.001f)
-      //   and a fixed sample rate of 44100
-      // - This means the frontend expects exactly 735.735
-      //   sample frames per call of retro_run()
-      // - But the core doesn't work like that...
-      // - Each call of UpdateSound() generates 512 sample
-      //   frames at 44100 Hz
-      // - When a game runs internally at ~60 fps,
-      //   this does indeed translate to 735.735 sample frames
-      //   per call of retro_run()
-      // - When a game runs internally at ~30 fps, UpdateSound()
-      //   gets called at *twice* the expected rate - so we
-      //   get double the expected number of sample frames
-      // - By pushing twice the number of frames, we effectively
-      //   force the frontend to run in slow motion
-      //   (2x sample buffer size == 1/2 running speed)
-      // - The PSP can run at a variety of framerates; in each
-      //   case, the core is abusing the frontend by sending
-      //   too many/too few audio samples in order to force the
-      //   correct run speed
-      // - The core should instead be notifying the frontend of
-      //   framerate changes, and at each framerate it should be
-      //   sending (44100 / framerate) audio sample frames
-      // - But doing this is a non-trivial task...
-      // - So the best we can do is keep a running average of the
-      //   current ring buffer occupancy, and drain this amount
-      //   on each call of retro_run()...
+
+      // - If 'Detect Frame Rate Changes' is disabled, then
+      //   the  core specifies a fixed frame rate of (60.0f / 1.001f)
+      // - At the audio sample rate of 44100, this means the
+      //   frontend expects exactly 735.735 sample frames per call of
+      //   retro_run()
+      // - If g_Config.bRenderDuplicateFrames is enabled and
+      //   frameskip is disabled, the mean of the buffer occupancy
+      //   willapproximate to this value in most cases
       uint32_t framesAvailable = AudioBufferOccupancy();
 
       if (framesAvailable > 0)
@@ -220,10 +364,15 @@ namespace Libretro
          int16_t *audioOutBufferPtr = audioOutBuffer;
          while (frames > 0)
          {
-            uint32_t framesToWrite = (frames > AUDIO_BATCH_FRAMES_MAX) ?
-                  AUDIO_BATCH_FRAMES_MAX : frames;
+            uint32_t framesToWrite = (frames > audioBatchFramesMax) ?
+                  audioBatchFramesMax : frames;
+            uint32_t framesWritten = audio_batch_cb(audioOutBufferPtr,
+                  framesToWrite);
 
-            audio_batch_cb(audioOutBufferPtr, framesToWrite);
+            if ((framesWritten < framesToWrite) &&
+                (framesWritten > 0))
+               audioBatchFramesMax = framesWritten;
+
             frames -= framesToWrite;
             audioOutBufferPtr += framesToWrite << 1;
          }
@@ -242,7 +391,7 @@ class LibretroHost : public Host
       void InitSound() override {}
       void UpdateSound() override
       {
-         extern int hostAttemptBlockSize;
+         int hostAttemptBlockSize = __AudioGetHostAttemptBlockSize();
          const int blockSizeMax = 512;
          static int16_t audio[blockSizeMax * 2];
          assert(hostAttemptBlockSize <= blockSizeMax);
@@ -291,150 +440,92 @@ class PrintfLogger : public LogListener
 };
 static PrintfLogger *printfLogger;
 
-template <typename T> class RetroOption
+static bool set_variable_visibility(void)
 {
-   public:
-      RetroOption(const char *id, const char *name, std::initializer_list<std::pair<const char *, T>> list) : id_(id), name_(name), list_(list.begin(), list.end()) {}
-      RetroOption(const char *id, const char *name, std::initializer_list<const char *> list) : id_(id), name_(name) {
-         for (auto option : list)
-            list_.push_back({ option, (T)list_.size() });
-      }
-      RetroOption(const char *id, const char *name, T first, std::initializer_list<const char *> list) : id_(id), name_(name) {
-         for (auto option : list)
-            list_.push_back({ option, first + (int)list_.size() });
-      }
-      RetroOption(const char *id, const char *name, T first, int count, int step = 1) : id_(id), name_(name) {
-         for (T i = first; i < first + count; i += step)
-            list_.push_back({ std::to_string(i), i });
-      }
-      RetroOption(const char *id, const char *name, bool initial) : id_(id), name_(name) {
-         list_.push_back({ initial ? "enabled" : "disabled", initial });
-         list_.push_back({ !initial ? "enabled" : "disabled", !initial });
-      }
+   struct retro_core_option_display option_display;
+   struct retro_variable var;
+   bool updated = false;
 
-      retro_variable GetOptions()
+   // Show/hide IP address options
+   bool show_ip_address_options_prev = show_ip_address_options;
+   show_ip_address_options = true;
+
+   var.key = "ppsspp_change_pro_ad_hoc_server_address";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "IP address"))
+      show_ip_address_options = false;
+
+   if (show_ip_address_options != show_ip_address_options_prev)
+   {
+      option_display.visible = show_ip_address_options;
+      for (int i = 0; i < 12; i++)
       {
-         if (options_.empty())
-         {
-            options_ = name_;
-            options_.push_back(';');
-            for (auto &option : list_)
-            {
-               if (option.first == list_.begin()->first)
-                  options_ += std::string(" ") + option.first;
-               else
-                  options_ += std::string("|") + option.first;
-            }
-         }
-         return { id_, options_.c_str() };
+         char key[64] = {0};
+         option_display.key = key;
+         snprintf(key, sizeof(key), "ppsspp_pro_ad_hoc_server_address%02d", i + 1);
+         environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
       }
+      updated = true;
+   }
 
-      bool Update(T *dest)
-      {
-         retro_variable var{ id_ };
-         T val = list_.front().second;
+   // Show/hide 'UPnP Use Original Port' option
+   bool show_upnp_port_option_prev = show_upnp_port_option;
+   show_upnp_port_option = true;
 
-         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-         {
-            for (auto option : list_)
-            {
-               if (option.first == var.value)
-               {
-                  val = option.second;
-                  break;
-               }
-            }
-         }
+   var.key = "ppsspp_enable_upnp";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && !strcmp(var.value, "disabled"))
+      show_upnp_port_option = false;
 
-         if (*dest != val)
-         {
-            *dest = val;
-            return true;
-         }
+   if (show_upnp_port_option != show_upnp_port_option_prev)
+   {
+      option_display.visible = show_upnp_port_option;
+      option_display.key = "ppsspp_upnp_use_original_port";
+      environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+      updated = true;
+   }
 
-         return false;
-      }
+   // Show/hide 'Detect Frame Rate Changes' option
+   bool show_detect_frame_rate_option_prev = show_detect_frame_rate_option;
+   int frameskip = 0;
+   bool auto_frameskip = false;
+   bool dupe_frames = false;
+   show_detect_frame_rate_option = true;
 
-   private:
-      const char *id_;
-      const char *name_;
-      std::string options_;
-      std::vector<std::pair<std::string, T>> list_;
-};
+   var.key = "ppsspp_frameskip";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "disabled"))
+      frameskip = atoi(var.value);
+   var.key = "ppsspp_auto_frameskip";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && !strcmp(var.value, "enabled"))
+      auto_frameskip = true;
+   var.key = "ppsspp_frame_duplication";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && !strcmp(var.value, "enabled"))
+      dupe_frames = true;
 
-static RetroOption<CPUCore> ppsspp_cpu_core("ppsspp_cpu_core", "CPU Core", { { "JIT", CPUCore::JIT }, { "IR JIT", CPUCore::IR_JIT }, { "Interpreter", CPUCore::INTERPRETER } });
-static RetroOption<int> ppsspp_locked_cpu_speed("ppsspp_locked_cpu_speed", "Locked CPU Speed", { { "off", 0 }, { "222MHz", 222 }, { "266MHz", 266 }, { "333MHz", 333 } });
-static RetroOption<int> ppsspp_language("ppsspp_language", "Language", { { "Automatic", -1 }, { "English", PSP_SYSTEMPARAM_LANGUAGE_ENGLISH }, { "Japanese", PSP_SYSTEMPARAM_LANGUAGE_JAPANESE }, { "French", PSP_SYSTEMPARAM_LANGUAGE_FRENCH }, { "Spanish", PSP_SYSTEMPARAM_LANGUAGE_SPANISH }, { "German", PSP_SYSTEMPARAM_LANGUAGE_GERMAN }, { "Italian", PSP_SYSTEMPARAM_LANGUAGE_ITALIAN }, { "Dutch", PSP_SYSTEMPARAM_LANGUAGE_DUTCH }, { "Portuguese", PSP_SYSTEMPARAM_LANGUAGE_PORTUGUESE }, { "Russian", PSP_SYSTEMPARAM_LANGUAGE_RUSSIAN }, { "Korean", PSP_SYSTEMPARAM_LANGUAGE_KOREAN }, { "Chinese Traditional", PSP_SYSTEMPARAM_LANGUAGE_CHINESE_TRADITIONAL }, { "Chinese Simplified", PSP_SYSTEMPARAM_LANGUAGE_CHINESE_SIMPLIFIED } });
-static RetroOption<int> ppsspp_rendering_mode("ppsspp_rendering_mode", "Rendering Mode", { { "Buffered", FB_BUFFERED_MODE }, { "Skip Buffer Effects", FB_NON_BUFFERED_MODE } });
-static RetroOption<bool> ppsspp_auto_frameskip("ppsspp_auto_frameskip", "Auto Frameskip", false);
-static RetroOption<int> ppsspp_frameskip("ppsspp_frameskip", "Frameskip", { "Off", "1", "2", "3", "4", "5", "6", "7", "8" });
-static RetroOption<int> ppsspp_frameskiptype("ppsspp_frameskiptype", "Frameskip Type", { {"Number of frames", 0}, {"Percent of FPS", 1} });
-static RetroOption<int> ppsspp_internal_resolution("ppsspp_internal_resolution", "Internal Resolution (Restart)", 1, { "480x272", "960x544", "1440x816", "1920x1088", "2400x1360", "2880x1632", "3360x1904", "3840x2176", "4320x2448", "4800x2720" });
-static RetroOption<int> ppsspp_button_preference("ppsspp_button_preference", "Confirmation Button", { { "Cross", PSP_SYSTEMPARAM_BUTTON_CROSS }, { "Circle", PSP_SYSTEMPARAM_BUTTON_CIRCLE } });
-static RetroOption<bool> ppsspp_fast_memory("ppsspp_fast_memory", "Fast Memory (Speedhack)", true);
-static RetroOption<bool> ppsspp_block_transfer_gpu("ppsspp_block_transfer_gpu", "Block Transfer GPU", true);
-static RetroOption<int> ppsspp_inflight_frames("ppsspp_inflight_frames", "Buffered frames (Slower, less lag, restart)", { { "Up to 2", 2 }, { "Up to 1", 1 }, { "No buffer", 0 }, });
-static RetroOption<int> ppsspp_texture_scaling_level("ppsspp_texture_scaling_level", "Texture Scaling Level", { { "Off", 1 }, { "2x", 2 }, { "3x", 3 }, { "4x", 4 }, { "5x", 5 } });
-static RetroOption<int> ppsspp_texture_scaling_type("ppsspp_texture_scaling_type", "Texture Scaling Type", { { "xbrz", TextureScalerCommon::XBRZ }, { "hybrid", TextureScalerCommon::HYBRID }, { "bicubic", TextureScalerCommon::BICUBIC }, { "hybrid_bicubic", TextureScalerCommon::HYBRID_BICUBIC } });
-static RetroOption<std::string> ppsspp_texture_shader("ppsspp_texture_shader", "Texture Shader (Vulkan only, overrides Texture Scaling Type)", { {"Off", "Off"},  {"4xBRZ", "Tex4xBRZ"}, {"MMPX", "TexMMPX"} });
-static RetroOption<int> ppsspp_texture_filtering("ppsspp_texture_filtering", "Texture Filtering", { { "Auto", 1 }, { "Nearest", 2 }, { "Linear", 3 }, {"Auto max quality", 4}});
-static RetroOption<int> ppsspp_texture_anisotropic_filtering("ppsspp_texture_anisotropic_filtering", "Anisotropic Filtering", { "off", "2x", "4x", "8x", "16x" });
-static RetroOption<int> ppsspp_lower_resolution_for_effects("ppsspp_lower_resolution_for_effects", "Lower resolution for effects", { {"Off", 0}, {"Safe", 1}, {"Balanced", 2}, {"Aggressive", 3} });
-static RetroOption<bool> ppsspp_texture_deposterize("ppsspp_texture_deposterize", "Texture Deposterize", false);
-static RetroOption<bool> ppsspp_texture_replacement("ppsspp_texture_replacement", "Texture Replacement", false);
-static RetroOption<bool> ppsspp_gpu_hardware_transform("ppsspp_gpu_hardware_transform", "GPU Hardware T&L", true);
-static RetroOption<bool> ppsspp_vertex_cache("ppsspp_vertex_cache", "Vertex Cache (Speedhack)", false);
-static RetroOption<bool> ppsspp_cheats("ppsspp_cheats", "Internal Cheats Support", false);
-static RetroOption<IOTimingMethods> ppsspp_io_timing_method("ppsspp_io_timing_method", "IO Timing Method", { { "Fast", IOTimingMethods::IOTIMING_FAST }, { "Host", IOTimingMethods::IOTIMING_HOST }, { "Simulate UMD delays", IOTimingMethods::IOTIMING_REALISTIC } });
-static RetroOption<bool> ppsspp_frame_duplication("ppsspp_frame_duplication", "Duplicate frames in 30hz games", false);
-static RetroOption<bool> ppsspp_software_skinning("ppsspp_software_skinning", "Software Skinning", true);
-static RetroOption<bool> ppsspp_ignore_bad_memory_access("ppsspp_ignore_bad_memory_access", "Ignore bad memory accesses", true);
-static RetroOption<bool> ppsspp_lazy_texture_caching("ppsspp_lazy_texture_caching", "Lazy texture caching (Speedup)", false);
-static RetroOption<bool> ppsspp_retain_changed_textures("ppsspp_retain_changed_textures", "Retain changed textures (Speedup, mem hog)", false);
-static RetroOption<bool> ppsspp_force_lag_sync("ppsspp_force_lag_sync", "Force real clock sync (Slower, less lag)", false);
-static RetroOption<int> ppsspp_spline_quality("ppsspp_spline_quality", "Spline/Bezier curves quality", { {"Low", 0}, {"Medium", 1}, {"High", 2} });
-static RetroOption<bool> ppsspp_disable_slow_framebuffer_effects("ppsspp_disable_slow_framebuffer_effects", "Disable slower effects (Speedup)", false);
+   show_detect_frame_rate_option = (frameskip == 0) && !auto_frameskip && !dupe_frames;
+   if (show_detect_frame_rate_option != show_detect_frame_rate_option_prev)
+   {
+      option_display.visible = show_detect_frame_rate_option;
+      option_display.key = "ppsspp_detect_vsync_swap_interval";
+      environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+      updated = true;
+   }
+
+   return updated;
+}
 
 void retro_set_environment(retro_environment_t cb)
 {
-   std::vector<retro_variable> vars;
-   vars.push_back(ppsspp_internal_resolution.GetOptions());
-   vars.push_back(ppsspp_cpu_core.GetOptions());
-   vars.push_back(ppsspp_locked_cpu_speed.GetOptions());
-   vars.push_back(ppsspp_language.GetOptions());
-   vars.push_back(ppsspp_button_preference.GetOptions());
-   vars.push_back(ppsspp_rendering_mode.GetOptions());
-   vars.push_back(ppsspp_gpu_hardware_transform.GetOptions());
-   vars.push_back(ppsspp_texture_anisotropic_filtering.GetOptions());
-   vars.push_back(ppsspp_spline_quality.GetOptions());
-   vars.push_back(ppsspp_auto_frameskip.GetOptions());
-   vars.push_back(ppsspp_frameskip.GetOptions());
-   vars.push_back(ppsspp_frameskiptype.GetOptions());
-   vars.push_back(ppsspp_frame_duplication.GetOptions());
-   vars.push_back(ppsspp_vertex_cache.GetOptions());
-   vars.push_back(ppsspp_fast_memory.GetOptions());
-   vars.push_back(ppsspp_block_transfer_gpu.GetOptions());
-   vars.push_back(ppsspp_inflight_frames.GetOptions());
-   vars.push_back(ppsspp_software_skinning.GetOptions());
-   vars.push_back(ppsspp_lazy_texture_caching.GetOptions());
-   vars.push_back(ppsspp_retain_changed_textures.GetOptions());
-   vars.push_back(ppsspp_force_lag_sync.GetOptions());
-   vars.push_back(ppsspp_disable_slow_framebuffer_effects.GetOptions());
-   vars.push_back(ppsspp_lower_resolution_for_effects.GetOptions());
-   vars.push_back(ppsspp_texture_scaling_level.GetOptions());
-   vars.push_back(ppsspp_texture_scaling_type.GetOptions());
-   vars.push_back(ppsspp_texture_shader.GetOptions());
-   vars.push_back(ppsspp_texture_filtering.GetOptions());
-   vars.push_back(ppsspp_texture_deposterize.GetOptions());
-   vars.push_back(ppsspp_texture_replacement.GetOptions());
-   vars.push_back(ppsspp_io_timing_method.GetOptions());
-   vars.push_back(ppsspp_ignore_bad_memory_access.GetOptions());
-   vars.push_back(ppsspp_cheats.GetOptions());
-   vars.push_back({});
-
    environ_cb = cb;
 
-   cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars.data());
+   libretro_set_core_options(environ_cb, &libretro_supports_option_categories);
+   struct retro_core_options_update_display_callback update_display_cb;
+   update_display_cb.callback = set_variable_visibility;
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK, &update_display_cb);
+
+   #ifdef HAVE_LIBRETRO_VFS
+      struct retro_vfs_interface_info vfs_iface_info { 1, nullptr };
+      if (cb(RETRO_ENVIRONMENT_GET_VFS_INTERFACE, &vfs_iface_info))
+         filestream_vfs_init(&vfs_iface_info);
+   #endif
 }
 
 static int get_language_auto(void)
@@ -514,68 +605,608 @@ static void check_variables(CoreParameter &coreParam)
          && !updated)
       return;
 
-   ppsspp_button_preference.Update(&g_Config.iButtonPreference);
-   ppsspp_fast_memory.Update(&g_Config.bFastMemory);
-   ppsspp_vertex_cache.Update(&g_Config.bVertexCache);
-   ppsspp_gpu_hardware_transform.Update(&g_Config.bHardwareTransform);
-   ppsspp_frameskip.Update(&g_Config.iFrameSkip);
-   ppsspp_frameskiptype.Update(&g_Config.iFrameSkipType);
-   ppsspp_auto_frameskip.Update(&g_Config.bAutoFrameSkip);
-   ppsspp_block_transfer_gpu.Update(&g_Config.bBlockTransferGPU);
-   ppsspp_texture_filtering.Update(&g_Config.iTexFiltering);
-   ppsspp_texture_anisotropic_filtering.Update(&g_Config.iAnisotropyLevel);
-   ppsspp_texture_deposterize.Update(&g_Config.bTexDeposterize);
-   ppsspp_texture_replacement.Update(&g_Config.bReplaceTextures);
-   ppsspp_cheats.Update(&g_Config.bEnableCheats);
-   ppsspp_locked_cpu_speed.Update(&g_Config.iLockedCPUSpeed);
-   ppsspp_rendering_mode.Update(&g_Config.iRenderingMode);
-   ppsspp_cpu_core.Update((CPUCore *)&g_Config.iCpuCore);
-   ppsspp_io_timing_method.Update((IOTimingMethods *)&g_Config.iIOTimingMethod);
-   ppsspp_lower_resolution_for_effects.Update(&g_Config.iBloomHack);
-   ppsspp_frame_duplication.Update(&g_Config.bRenderDuplicateFrames);
-   ppsspp_software_skinning.Update(&g_Config.bSoftwareSkinning);
-   ppsspp_ignore_bad_memory_access.Update(&g_Config.bIgnoreBadMemAccess);
-   ppsspp_lazy_texture_caching.Update(&g_Config.bTextureBackoffCache);
-   ppsspp_retain_changed_textures.Update(&g_Config.bTextureSecondaryCache);
-   ppsspp_force_lag_sync.Update(&g_Config.bForceLagSync);
-   ppsspp_spline_quality.Update(&g_Config.iSplineBezierQuality);
-   ppsspp_disable_slow_framebuffer_effects.Update(&g_Config.bDisableSlowFramebufEffects);
-   ppsspp_inflight_frames.Update(&g_Config.iInflightFrames);
-   const bool do_scaling_type_update = ppsspp_texture_scaling_type.Update(&g_Config.iTexScalingType);
-   const bool do_scaling_level_update = ppsspp_texture_scaling_level.Update(&g_Config.iTexScalingLevel);
-   const bool do_texture_shader_update = ppsspp_texture_shader.Update(&g_Config.sTextureShaderName);
-   
-   g_Config.bTexHardwareScaling = "Off" != g_Config.sTextureShaderName;
-   
-   if (gpu && (do_scaling_type_update || do_scaling_level_update || do_texture_shader_update))
+   struct retro_variable var = {0};
+   std::string sTextureShaderName_prev;
+   int iInternalResolution_prev;
+   int iTexScalingType_prev;
+   int iTexScalingLevel_prev;
+   int iMultiSampleLevel_prev;
+
+   var.key = "ppsspp_language";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
-      gpu->ClearCacheNextFrame();
-      gpu->Resized();
+      if (!strcmp(var.value, "Automatic"))
+         g_Config.iLanguage = -1;
+      else if (!strcmp(var.value, "English"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_ENGLISH;
+      else if (!strcmp(var.value, "Japanese"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_JAPANESE;
+      else if (!strcmp(var.value, "French"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_FRENCH;
+      else if (!strcmp(var.value, "Spanish"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_SPANISH;
+      else if (!strcmp(var.value, "German"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_GERMAN;
+      else if (!strcmp(var.value, "Italian"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_ITALIAN;
+      else if (!strcmp(var.value, "Dutch"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_DUTCH;
+      else if (!strcmp(var.value, "Portuguese"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_PORTUGUESE;
+      else if (!strcmp(var.value, "Russian"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_RUSSIAN;
+      else if (!strcmp(var.value, "Korean"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_KOREAN;
+      else if (!strcmp(var.value, "Chinese Traditional"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_CHINESE_TRADITIONAL;
+      else if (!strcmp(var.value, "Chinese Simplified"))
+         g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_CHINESE_SIMPLIFIED;
    }
 
-   ppsspp_language.Update(&g_Config.iLanguage);
+   var.key = "ppsspp_cpu_core";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "JIT"))
+         g_Config.iCpuCore = (int)CPUCore::JIT;
+      else if (!strcmp(var.value, "IR JIT"))
+         g_Config.iCpuCore = (int)CPUCore::IR_JIT;
+      else if (!strcmp(var.value, "Interpreter"))
+         g_Config.iCpuCore = (int)CPUCore::INTERPRETER;
+   }
+
+   if (System_GetPropertyBool(SYSPROP_CAN_JIT) == false && g_Config.iCpuCore == (int)CPUCore::JIT) {
+       // Just gonna force it to the IR interpreter on startup.
+       // We don't hide the option, but we make sure it's off on bootup. In case someone wants
+       // to experiment in future iOS versions or something...
+       g_Config.iCpuCore = (int)CPUCore::IR_JIT;
+   }
+
+   var.key = "ppsspp_fast_memory";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bFastMemory = false;
+      else
+         g_Config.bFastMemory = true;
+   }
+
+   var.key = "ppsspp_ignore_bad_memory_access";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bIgnoreBadMemAccess = false;
+      else
+         g_Config.bIgnoreBadMemAccess = true;
+   }
+
+   var.key = "ppsspp_io_timing_method";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "Fast"))
+         g_Config.iIOTimingMethod = IOTIMING_FAST;
+      else if (!strcmp(var.value, "Host"))
+         g_Config.iIOTimingMethod = IOTIMING_HOST;
+      else if (!strcmp(var.value, "Simulate UMD delays"))
+         g_Config.iIOTimingMethod = IOTIMING_REALISTIC;
+   }
+
+   var.key = "ppsspp_force_lag_sync";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bForceLagSync = false;
+      else
+         g_Config.bForceLagSync = true;
+   }
+
+   var.key = "ppsspp_locked_cpu_speed";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      g_Config.iLockedCPUSpeed = atoi(var.value);
+
+   var.key = "ppsspp_cache_iso";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bCacheFullIsoInRam = false;
+      else
+         g_Config.bCacheFullIsoInRam = true;
+   }
+
+   var.key = "ppsspp_cheats";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bEnableCheats = false;
+      else
+         g_Config.bEnableCheats = true;
+   }
+
+   var.key = "ppsspp_psp_model";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "psp_1000"))
+         g_Config.iPSPModel = PSP_MODEL_FAT;
+      else if (!strcmp(var.value, "psp_2000_3000"))
+         g_Config.iPSPModel = PSP_MODEL_SLIM;
+   }
+
+   var.key = "ppsspp_button_preference";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "Cross"))
+         g_Config.iButtonPreference = PSP_SYSTEMPARAM_BUTTON_CROSS;
+      else if (!strcmp(var.value, "Circle"))
+         g_Config.iButtonPreference = PSP_SYSTEMPARAM_BUTTON_CIRCLE;
+   }
+
+   var.key = "ppsspp_analog_is_circular";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bAnalogIsCircular = false;
+      else
+         g_Config.bAnalogIsCircular = true;
+   }
+
+
+   var.key = "ppsspp_internal_resolution";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      iInternalResolution_prev = g_Config.iInternalResolution;
+
+      if (!strcmp(var.value, "480x272"))
+         g_Config.iInternalResolution = 1;
+      else if (!strcmp(var.value, "960x544"))
+         g_Config.iInternalResolution = 2;
+      else if (!strcmp(var.value, "1440x816"))
+         g_Config.iInternalResolution = 3;
+      else if (!strcmp(var.value, "1920x1088"))
+         g_Config.iInternalResolution = 4;
+      else if (!strcmp(var.value, "2400x1360"))
+         g_Config.iInternalResolution = 5;
+      else if (!strcmp(var.value, "2880x1632"))
+         g_Config.iInternalResolution = 6;
+      else if (!strcmp(var.value, "3360x1904"))
+         g_Config.iInternalResolution = 7;
+      else if (!strcmp(var.value, "3840x2176"))
+         g_Config.iInternalResolution = 8;
+      else if (!strcmp(var.value, "4320x2448"))
+         g_Config.iInternalResolution = 9;
+      else if (!strcmp(var.value, "4800x2720"))
+         g_Config.iInternalResolution = 10;
+   }
+
+   var.key = "ppsspp_mulitsample_level";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      iMultiSampleLevel_prev = g_Config.iMultiSampleLevel;
+
+      if (!strcmp(var.value, "Disabled"))
+         g_Config.iMultiSampleLevel = 0;
+      else if (!strcmp(var.value, "x2"))
+         g_Config.iMultiSampleLevel = 1;
+      else if (!strcmp(var.value, "x4"))
+         g_Config.iMultiSampleLevel = 2;
+      else if (!strcmp(var.value, "x8"))
+         g_Config.iMultiSampleLevel = 3;
+   }
+
+   var.key = "ppsspp_skip_buffer_effects";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bSkipBufferEffects = false;
+      else
+         g_Config.bSkipBufferEffects = true;
+   }
+
+   var.key = "ppsspp_skip_gpu_readbacks";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bSkipGPUReadbacks = false;
+      else
+         g_Config.bSkipGPUReadbacks = true;
+   }
+
+   var.key = "ppsspp_frameskip";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      g_Config.iFrameSkip = atoi(var.value);
+
+   var.key = "ppsspp_frameskiptype";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "Number of frames"))
+         g_Config.iFrameSkipType = 0;
+      else if (!strcmp(var.value, "Percent of FPS"))
+         g_Config.iFrameSkipType = 1;
+   }
+
+   var.key = "ppsspp_auto_frameskip";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bAutoFrameSkip = false;
+      else
+         g_Config.bAutoFrameSkip = true;
+   }
+
+   var.key = "ppsspp_frame_duplication";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bRenderDuplicateFrames = false;
+      else
+         g_Config.bRenderDuplicateFrames = true;
+   }
+
+   var.key = "ppsspp_detect_vsync_swap_interval";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         detectVsyncSwapInterval = false;
+      else
+         detectVsyncSwapInterval = true;
+   }
+
+   var.key = "ppsspp_inflight_frames";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "No buffer"))
+         g_Config.iInflightFrames = 0;
+      else if (!strcmp(var.value, "Up to 1"))
+         g_Config.iInflightFrames = 1;
+      else if (!strcmp(var.value, "Up to 2"))
+         g_Config.iInflightFrames = 2;
+   }
+
+   var.key = "ppsspp_gpu_hardware_transform";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bHardwareTransform = false;
+      else
+         g_Config.bHardwareTransform = true;
+   }
+
+   var.key = "ppsspp_software_skinning";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bSoftwareSkinning = false;
+      else
+         g_Config.bSoftwareSkinning = true;
+   }
+
+   var.key = "ppsspp_vertex_cache";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bVertexCache = false;
+      else
+         g_Config.bVertexCache = true;
+   }
+
+   var.key = "ppsspp_lazy_texture_caching";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bTextureBackoffCache = false;
+      else
+         g_Config.bTextureBackoffCache = true;
+   }
+
+   var.key = "ppsspp_spline_quality";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "Low"))
+         g_Config.iSplineBezierQuality = 0;
+      else if (!strcmp(var.value, "Medium"))
+         g_Config.iSplineBezierQuality = 1;
+      else if (!strcmp(var.value, "High"))
+         g_Config.iSplineBezierQuality = 2;
+   }
+
+   var.key = "ppsspp_hardware_tesselation";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bHardwareTessellation = false;
+      else
+         g_Config.bHardwareTessellation = true;
+   }
+
+   var.key = "ppsspp_lower_resolution_for_effects";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.iBloomHack = 0;
+      else if (!strcmp(var.value, "Safe"))
+         g_Config.iBloomHack = 1;
+      else if (!strcmp(var.value, "Balanced"))
+         g_Config.iBloomHack = 2;
+      else if (!strcmp(var.value, "Aggressive"))
+         g_Config.iBloomHack = 3;
+   }
+
+   var.key = "ppsspp_texture_scaling_type";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      iTexScalingType_prev = g_Config.iTexScalingType;
+
+      if (!strcmp(var.value, "xbrz"))
+         g_Config.iTexScalingType = TextureScalerCommon::XBRZ;
+      else if (!strcmp(var.value, "hybrid"))
+         g_Config.iTexScalingType = TextureScalerCommon::HYBRID;
+      else if (!strcmp(var.value, "bicubic"))
+         g_Config.iTexScalingType = TextureScalerCommon::BICUBIC;
+      else if (!strcmp(var.value, "hybrid_bicubic"))
+         g_Config.iTexScalingType = TextureScalerCommon::HYBRID_BICUBIC;
+   }
+
+   var.key = "ppsspp_texture_scaling_level";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      iTexScalingLevel_prev = g_Config.iTexScalingLevel;
+
+      if (!strcmp(var.value, "disabled"))
+         g_Config.iTexScalingLevel = 1;
+      else if (!strcmp(var.value, "2x"))
+         g_Config.iTexScalingLevel = 2;
+      else if (!strcmp(var.value, "3x"))
+         g_Config.iTexScalingLevel = 3;
+      else if (!strcmp(var.value, "4x"))
+         g_Config.iTexScalingLevel = 4;
+      else if (!strcmp(var.value, "5x"))
+         g_Config.iTexScalingLevel = 5;
+   }
+
+   var.key = "ppsspp_texture_deposterize";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bTexDeposterize = false;
+      else
+         g_Config.bTexDeposterize = true;
+   }
+
+   var.key = "ppsspp_texture_shader";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      sTextureShaderName_prev = g_Config.sTextureShaderName;
+
+      if (!strcmp(var.value, "disabled"))
+         g_Config.sTextureShaderName = "Off";
+      else if (!strcmp(var.value, "2xBRZ"))
+         g_Config.sTextureShaderName = "Tex2xBRZ";
+      else if (!strcmp(var.value, "4xBRZ"))
+         g_Config.sTextureShaderName = "Tex4xBRZ";
+      else if (!strcmp(var.value, "MMPX"))
+         g_Config.sTextureShaderName = "TexMMPX";
+   }
+
+   var.key = "ppsspp_texture_anisotropic_filtering";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.iAnisotropyLevel = 0;
+      else if (!strcmp(var.value, "2x"))
+         g_Config.iAnisotropyLevel = 1;
+      else if (!strcmp(var.value, "4x"))
+         g_Config.iAnisotropyLevel = 2;
+      else if (!strcmp(var.value, "8x"))
+         g_Config.iAnisotropyLevel = 3;
+      else if (!strcmp(var.value, "16x"))
+         g_Config.iAnisotropyLevel = 4;
+   }
+
+   var.key = "ppsspp_texture_filtering";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "Auto"))
+         g_Config.iTexFiltering = 1;
+      else if (!strcmp(var.value, "Nearest"))
+         g_Config.iTexFiltering = 2;
+      else if (!strcmp(var.value, "Linear"))
+         g_Config.iTexFiltering = 3;
+      else if (!strcmp(var.value, "Auto max quality"))
+         g_Config.iTexFiltering = 4;
+   }
+
+   var.key = "ppsspp_texture_replacement";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bReplaceTextures = false;
+      else
+         g_Config.bReplaceTextures = true;
+   }
+
+   var.key = "ppsspp_enable_wlan";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bEnableWlan = false;
+      else
+         g_Config.bEnableWlan = true;
+   }
+
+   var.key = "ppsspp_wlan_channel";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      g_Config.iWlanAdhocChannel = atoi(var.value);
+
+   var.key = "ppsspp_enable_builtin_pro_ad_hoc_server";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bEnableAdhocServer = false;
+      else
+         g_Config.bEnableAdhocServer = true;
+   }
+
+   var.key = "ppsspp_change_pro_ad_hoc_server_address";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      changeProAdhocServer = var.value;
+
+   var.key = "ppsspp_enable_upnp";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bEnableUPnP = false;
+      else
+         g_Config.bEnableUPnP = true;
+   }
+
+   var.key = "ppsspp_upnp_use_original_port";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bUPnPUseOriginalPort = false;
+      else
+         g_Config.bUPnPUseOriginalPort = true;
+   }
+
+   var.key = "ppsspp_port_offset";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      g_Config.iPortOffset = atoi(var.value);
+
+   var.key = "ppsspp_minimum_timeout";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      g_Config.iMinTimeout = atoi(var.value);
+
+   var.key = "ppsspp_forced_first_connect";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "disabled"))
+         g_Config.bForcedFirstConnect = false;
+      else
+         g_Config.bForcedFirstConnect = true;
+   }
+
+   std::string ppsspp_change_mac_address[12];
+   int ppsspp_pro_ad_hoc_ipv4[12];
+   char key[64] = {0};
+   var.key = key;
+   g_Config.sMACAddress = "";
+   g_Config.proAdhocServer = "";
+   for (int i = 0; i < 12; i++)
+   {
+      snprintf(key, sizeof(key), "ppsspp_change_mac_address%02d", i + 1);
+      if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      {
+         ppsspp_change_mac_address[i] = var.value;
+
+         if (i && i % 2 == 0)
+             g_Config.sMACAddress += ":";
+
+         g_Config.sMACAddress += ppsspp_change_mac_address[i];
+      }
+
+      snprintf(key, sizeof(key), "ppsspp_pro_ad_hoc_server_address%02d", i + 1);
+      if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+         ppsspp_pro_ad_hoc_ipv4[i] = atoi(var.value);
+   }
+
+   if (g_Config.sMACAddress == "00:00:00:00:00:00")
+   {
+      g_Config.sMACAddress = CreateRandMAC();
+
+      for (int i = 0; i < 12; i++)
+      {
+         snprintf(key, sizeof(key), "ppsspp_change_mac_address%02d", i + 1);
+         std::string digit = {g_Config.sMACAddress[i + i / 2]};
+         var.value = digit.c_str();
+         environ_cb(RETRO_ENVIRONMENT_SET_VARIABLE, &var);
+      }
+   }
+
+   if (changeProAdhocServer == "IP address")
+   {
+      g_Config.proAdhocServer = "";
+      bool leadingZero = true;
+      for (int i = 0; i < 12; i++)
+      {
+         if (i && i % 3 == 0)
+         {
+            g_Config.proAdhocServer += '.';
+            leadingZero = true;
+         }
+
+         int addressPt = ppsspp_pro_ad_hoc_ipv4[i];
+         if (addressPt || i % 3 == 2)
+            leadingZero = false; // We are either non-zero or the last digit of a byte
+
+         if (! leadingZero)
+            g_Config.proAdhocServer += static_cast<char>('0' + addressPt);
+      }
+   }
+   else
+      g_Config.proAdhocServer = changeProAdhocServer;
+
+   g_Config.bTexHardwareScaling = g_Config.sTextureShaderName != "Off";
+
+   if (gpu && (g_Config.iTexScalingType != iTexScalingType_prev
+         || g_Config.iTexScalingLevel != iTexScalingLevel_prev
+         || g_Config.sTextureShaderName != sTextureShaderName_prev))
+   {
+      gpu->NotifyConfigChanged();
+   }
+
    if (g_Config.iLanguage < 0)
       g_Config.iLanguage = get_language_auto();
 
    g_Config.sLanguageIni = map_psp_language_to_i18n_locale(g_Config.iLanguage);
    i18nrepo.LoadIni(g_Config.sLanguageIni);
 
-   if (ppsspp_internal_resolution.Update(&g_Config.iInternalResolution) && !PSP_IsInited())
+   // Cannot detect refresh rate changes if:
+   // > Frame skipping is enabled
+   // > Frame duplication is enabled
+   detectVsyncSwapInterval &=
+         !g_Config.bAutoFrameSkip &&
+         (g_Config.iFrameSkip == 0) &&
+         !g_Config.bRenderDuplicateFrames;
+
+   bool updateAvInfo = false;
+   if (!detectVsyncSwapInterval && (vsyncSwapInterval != 1))
+   {
+      vsyncSwapInterval = 1;
+      updateAvInfo = true;
+   }
+
+   if (g_Config.iInternalResolution != iInternalResolution_prev && !PSP_IsInited())
    {
       coreParam.pixelWidth  = coreParam.renderWidth  = g_Config.iInternalResolution * 480;
       coreParam.pixelHeight = coreParam.renderHeight = g_Config.iInternalResolution * 272;
 
       if (gpu)
       {
-         retro_system_av_info av_info;
-         retro_get_system_av_info(&av_info);
-         environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av_info);
-         gpu->Resized();
+         retro_system_av_info avInfo;
+         retro_get_system_av_info(&avInfo);
+         environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avInfo);
+         updateAvInfo = false;
+         gpu->NotifyDisplayResized();
       }
+   }
+
+   if (g_Config.iMultiSampleLevel != iMultiSampleLevel_prev && PSP_IsInited())
+   {
+      if (gpu)
+      {
+         gpu->NotifyRenderResized();
+      }
+   }
+
+   if (updateAvInfo)
+   {
+      retro_system_av_info avInfo;
+      retro_get_system_av_info(&avInfo);
+      environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avInfo);
    }
 
    bool isFastForwarding = environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &isFastForwarding);
    coreParam.fastForward = isFastForwarding;
+
+   set_variable_visibility();
 }
 
 void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_cb = cb; }
@@ -585,6 +1216,7 @@ void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 
 void retro_init(void)
 {
+   VsyncSwapIntervalReset();
    AudioBufferInit();
 
    g_threadManager.Init(cpu_info.num_cores, cpu_info.logical_cpu_count);
@@ -628,7 +1260,6 @@ void retro_init(void)
 
    g_Config.Load("", "");
    g_Config.iInternalResolution = 0;
-   g_Config.sMACAddress = "12:34:56:78:9A:BC";
 
    const char* nickname = NULL;
    if (environ_cb(RETRO_ENVIRONMENT_GET_USERNAME, &nickname) && nickname)
@@ -650,8 +1281,10 @@ void retro_init(void)
    g_Config.memStickDirectory = retro_save_dir;
    g_Config.flash0Directory = retro_base_dir / "flash0";
    g_Config.internalDataDirectory = retro_base_dir;
+   g_Config.bEnableNetworkChat = false;
+   g_Config.bDiscordPresence = false;
 
-   VFSRegister("", new DirectoryAssetReader(retro_base_dir));
+   g_VFS.Register("", new DirectoryReader(retro_base_dir));
 
    host = new LibretroHost();
 }
@@ -668,7 +1301,9 @@ void retro_deinit(void)
    host = nullptr;
 
    libretro_supports_bitmasks = false;
+   libretro_supports_option_categories = false;
 
+   VsyncSwapIntervalReset();
    AudioBufferDeinit();
 }
 
@@ -690,7 +1325,7 @@ void retro_get_system_info(struct retro_system_info *info)
 void retro_get_system_av_info(struct retro_system_av_info *info)
 {
    *info = {};
-   info->timing.fps            = 60.0f / 1.001f;
+   info->timing.fps            = (60.0 / 1.001) / (double)vsyncSwapInterval;
    info->timing.sample_rate    = SAMPLERATE;
 
    info->geometry.base_width   = g_Config.iInternalResolution * 480;
@@ -816,6 +1451,9 @@ bool retro_load_game(const struct retro_game_info *game)
 
    useEmuThread              = ctx->GetGPUCore() == GPUCORE_GLES;
 
+   // default to interpreter to allow startup in platforms w/o JIT capability
+   g_Config.iCpuCore         = (int)CPUCore::INTERPRETER;
+
    CoreParameter coreParam   = {};
    coreParam.enableSound     = true;
    coreParam.fileToStart     = Path(std::string(game->path));
@@ -825,8 +1463,10 @@ bool retro_load_game(const struct retro_game_info *game)
    coreParam.headLess        = true;
    coreParam.graphicsContext = ctx;
    coreParam.gpuCore         = ctx->GetGPUCore();
-   coreParam.cpuCore         = (CPUCore)g_Config.iCpuCore;
    check_variables(coreParam);
+
+   // set cpuCore from libretro setting variable
+   coreParam.cpuCore         =  (CPUCore)g_Config.iCpuCore;
 
    std::string error_string;
    if (!PSP_InitStart(coreParam, &error_string))
@@ -834,6 +1474,8 @@ bool retro_load_game(const struct retro_game_info *game)
       ERROR_LOG(BOOT, "%s", error_string.c_str());
       return false;
    }
+
+   set_variable_visibility();
 
    return true;
 }
@@ -844,7 +1486,7 @@ void retro_unload_game(void)
 		Libretro::EmuThreadStop();
 
 	PSP_Shutdown();
-	VFSShutdown();
+	g_VFS.Clear();
 
 	delete ctx;
 	ctx = nullptr;
@@ -919,6 +1561,31 @@ static void retro_input(void)
    float y_left = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y) / -32767.0f;
    float x_right = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X) / 32767.0f;
    float y_right = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y) / -32767.0f;
+
+   __CtrlSetAnalogXY(CTRL_STICK_LEFT, x_left, y_left);
+   __CtrlSetAnalogXY(CTRL_STICK_RIGHT, x_right, y_right);
+
+   // Analog circle vs square gate compensation
+   // copied from ControlMapper.cpp's ConvertAnalogStick function
+   const bool isCircular = g_Config.bAnalogIsCircular;
+
+   float norm = std::max(fabsf(x_left), fabsf(y_left));
+
+   if (norm == 0.0f)
+      return;
+
+   if (isCircular) {
+      float newNorm = sqrtf(x_left * x_left + y_left * y_left);
+      float factor = newNorm / norm;
+      x_left *= factor;
+      y_left *= factor;
+      norm = newNorm;
+   }
+
+   float mappedNorm = norm;
+   x_left = std::clamp(x_left / norm * mappedNorm, -1.0f, 1.0f);
+   y_left = std::clamp(y_left / norm * mappedNorm, -1.0f, 1.0f);
+
    __CtrlSetAnalogXY(CTRL_STICK_LEFT, x_left, y_left);
    __CtrlSetAnalogXY(CTRL_STICK_RIGHT, x_right, y_right);
 }
@@ -937,14 +1604,6 @@ void retro_run(void)
          environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, nullptr);
          return;
       }
-
-      // Due to the fact that this core abuses the
-      // frontend audio buffer, we set a high(ish)
-      // frontend audio latency to help smooth
-      // things out...
-      unsigned audioLatency = 128;
-      environ_cb(RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY,
-            &audioLatency);
    }
 
    check_variables(PSP_CoreParameter());
@@ -956,6 +1615,7 @@ void retro_run(void)
       if(   emuThreadState == EmuThreadState::PAUSED ||
             emuThreadState == EmuThreadState::PAUSE_REQUESTED)
       {
+         VsyncSwapIntervalDetect();
          AudioUploadSamples();
          ctx->SwapBuffers();
          return;
@@ -966,6 +1626,7 @@ void retro_run(void)
 
       if (!ctx->ThreadFrame())
       {
+         VsyncSwapIntervalDetect();
          AudioUploadSamples();
          return;
       }
@@ -973,6 +1634,7 @@ void retro_run(void)
    else
       EmuFrame();
 
+   VsyncSwapIntervalDetect();
    AudioUploadSamples();
    ctx->SwapBuffers();
 }
@@ -1000,8 +1662,8 @@ size_t retro_serialize_size(void)
    if (useEmuThread)
       EmuThreadPause();
 
-   return (CChunkFileReader::MeasurePtr(state) + 0x800000)
-      & ~0x7FFFFF; // We don't unpause intentionally
+   return (CChunkFileReader::MeasurePtr(state) + 0x800000) & ~0x7FFFFF;
+   // We don't unpause intentionally
 }
 
 bool retro_serialize(void *data, size_t size)
@@ -1016,9 +1678,8 @@ bool retro_serialize(void *data, size_t size)
    if (useEmuThread)
       EmuThreadPause(); // Does nothing if already paused
 
-   size_t measured = CChunkFileReader::MeasurePtr(state);
-   assert(measured <= size);
-   auto err = CChunkFileReader::SavePtr((u8 *)data, state, measured);
+   size_t measuredSize;
+   auto err = CChunkFileReader::MeasureAndSavePtr(state, (u8 **)&data, &measuredSize);
    retVal = err == CChunkFileReader::ERROR_NONE;
 
    if (useEmuThread)
@@ -1058,7 +1719,7 @@ bool retro_unserialize(const void *data, size_t size)
 void *retro_get_memory_data(unsigned id)
 {
    if ( id == RETRO_MEMORY_SYSTEM_RAM )
-      return Memory::GetPointerUnchecked(PSP_GetKernelMemoryBase()) ;
+      return Memory::GetPointerWriteUnchecked(PSP_GetKernelMemoryBase()) ;
    return NULL;
 }
 
@@ -1069,9 +1730,86 @@ size_t retro_get_memory_size(unsigned id)
 	return 0;
 }
 
-void retro_cheat_reset(void) {}
+void retro_cheat_reset(void) {
+   // Init Cheat Engine
+   CWCheatEngine *cheatEngine = new CWCheatEngine(g_paramSFO.GetDiscID());
+   Path file=cheatEngine->CheatFilename();
 
-void retro_cheat_set(unsigned index, bool enabled, const char *code) { }
+   // Output cheats to cheat file
+   std::ofstream outFile;
+   outFile.open(file.c_str());
+   outFile << "_S " << g_paramSFO.GetDiscID() << std::endl;
+   outFile.close();
+
+   g_Config.bReloadCheats = true;
+
+   // Parse and Run the Cheats
+   cheatEngine->ParseCheats();
+   if (cheatEngine->HasCheats()) {
+      cheatEngine->Run();
+   }
+
+}
+
+void retro_cheat_set(unsigned index, bool enabled, const char *code) {
+   // Initialize Cheat Engine
+   CWCheatEngine *cheatEngine = new CWCheatEngine(g_paramSFO.GetDiscID());
+   cheatEngine->CreateCheatFile();
+   Path file=cheatEngine->CheatFilename();
+
+   // Read cheats file
+   std::vector<std::string> cheats;
+   std::ifstream cheat_content(file.c_str());
+   std::stringstream buffer;
+   buffer << cheat_content.rdbuf();
+   std::string existing_cheats=ReplaceAll(buffer.str(), std::string("\n_C"), std::string("|"));
+   SplitString(existing_cheats, '|', cheats);
+
+   // Generate Cheat String
+   std::stringstream cheat("");
+   cheat << (enabled ? "1 " : "0 ") << index << std::endl;
+   std::string code_str(code);
+   std::vector<std::string> codes;
+   code_str=ReplaceAll(code_str, std::string(" "), std::string("+"));
+   SplitString(code_str, '+', codes);
+   int part=0;
+   for (int i=0; i < codes.size(); i++) {
+      if (codes[i].size() <= 2) {
+         // _L _M ..etc
+         // Assume _L
+      } else if (part == 0) {
+         cheat << "_L " << codes[i] << " ";
+         part++;
+      } else {
+         cheat << codes[i] << std::endl;
+         part=0;
+      }
+   }
+
+   // Add or Replace the Cheat
+   if (index + 1 < cheats.size()) {
+      cheats[index + 1]=cheat.str();
+   } else {
+      cheats.push_back(cheat.str());
+   }
+
+   // Output cheats to cheat file
+   std::ofstream outFile;
+   outFile.open(file.c_str());
+   outFile << "_S " << g_paramSFO.GetDiscID() << std::endl;
+   for (int i=1; i < cheats.size(); i++) {
+      outFile << "_C" << cheats[i] << std::endl;
+   }
+   outFile.close();
+
+   g_Config.bReloadCheats = true;
+
+   // Parse and Run the Cheats
+   cheatEngine->ParseCheats();
+   if (cheatEngine->HasCheats()) {
+      cheatEngine->Run();
+   }
+}
 
 int System_GetPropertyInt(SystemProperty prop)
 {
@@ -1100,7 +1838,11 @@ float System_GetPropertyFloat(SystemProperty prop)
    switch (prop)
    {
       case SYSPROP_DISPLAY_REFRESH_RATE:
-         return 60.f;
+         // Have to lie here and report 60 Hz instead
+         // of (60.0 / 1.001), otherwise the internal
+         // stereo resampler will output at the wrong
+         // frequency...
+         return 60.0f;
       case SYSPROP_DISPLAY_SAFE_INSET_LEFT:
       case SYSPROP_DISPLAY_SAFE_INSET_RIGHT:
       case SYSPROP_DISPLAY_SAFE_INSET_TOP:
@@ -1118,7 +1860,11 @@ bool System_GetPropertyBool(SystemProperty prop)
    switch (prop)
    {
    case SYSPROP_CAN_JIT:
+#if PPSSPP_PLATFORM(IOS)
+      return false;
+#else
       return true;
+#endif
    default:
       return false;
    }
@@ -1131,6 +1877,8 @@ void System_SendMessage(const char *command, const char *parameter) {}
 void NativeUpdate() {}
 void NativeRender(GraphicsContext *graphicsContext) {}
 void NativeResized() {}
+
+void System_Toast(const char *str) {}
 
 #if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
 std::vector<std::string> __cameraGetDeviceList() { return std::vector<std::string>(); }

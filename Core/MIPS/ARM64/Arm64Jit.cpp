@@ -34,6 +34,7 @@
 #include "Core/MemMap.h"
 
 #include "Core/MIPS/MIPS.h"
+#include "Core/MIPS/MIPSAnalyst.h"
 #include "Core/MIPS/MIPSCodeUtils.h"
 #include "Core/MIPS/MIPSInt.h"
 #include "Core/MIPS/MIPSTables.h"
@@ -180,7 +181,9 @@ void Arm64Jit::ClearCache() {
 }
 
 void Arm64Jit::InvalidateCacheAt(u32 em_address, int length) {
-	blocks.InvalidateICache(em_address, length);
+	if (blocks.RangeMayHaveEmuHacks(em_address, em_address + length)) {
+		blocks.InvalidateICache(em_address, length);
+	}
 }
 
 void Arm64Jit::EatInstruction(MIPSOpcode op) {
@@ -227,7 +230,7 @@ void Arm64Jit::Compile(u32 em_address) {
 		ClearCache();
 	}
 
-	BeginWrite(4);
+	BeginWrite(JitBlockCache::MAX_BLOCK_INSTRUCTIONS * 16);
 
 	int block_num = blocks.AllocateBlock(em_address);
 	JitBlock *b = blocks.GetBlock(block_num);
@@ -424,12 +427,20 @@ bool Arm64Jit::DescribeCodePtr(const u8 *ptr, std::string &name) {
 		name = "loadStaticRegisters";
 	else {
 		u32 addr = blocks.GetAddressFromBlockPtr(ptr);
-		std::vector<int> numbers;
-		blocks.GetBlockNumbersFromAddress(addr, &numbers);
-		if (!numbers.empty()) {
-			const JitBlock *block = blocks.GetBlock(numbers[0]);
+		// Returns 0 when it's valid, but unknown.
+		if (addr == 0) {
+			name = "(unknown or deleted block)";
+			return true;
+		} else if (addr != (u32)-1) {
+			name = "(outside space)";
+			return true;
+		}
+
+		int number = blocks.GetBlockNumberFromAddress(addr);
+		if (number != -1) {
+			const JitBlock *block = blocks.GetBlock(number);
 			if (block) {
-				name = StringFromFormat("(block %d at %08x)", numbers[0], block->originalAddress);
+				name = StringFromFormat("(block %d at %08x)", number, block->originalAddress);
 				return true;
 			}
 		}

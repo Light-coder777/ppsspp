@@ -20,7 +20,6 @@
 #include <string>
 
 #include "Core/Compatibility.h"
-#include "Core/Config.h"
 
 enum GPUCore {
 	GPUCORE_GLES,
@@ -34,6 +33,7 @@ enum class FPSLimit {
 	NORMAL = 0,
 	CUSTOM1 = 1,
 	CUSTOM2 = 2,
+	ANALOG = 3,
 };
 
 class FileLoader;
@@ -66,7 +66,7 @@ struct CoreParameter {
 	bool headLess;   // Try to avoid messageboxes etc
 
 	// Internal PSP rendering resolution and scale factor.
-	int renderScaleFactor;
+	int renderScaleFactor = 1;
 	int renderWidth;
 	int renderHeight;
 
@@ -77,6 +77,7 @@ struct CoreParameter {
 	// Can be modified at runtime.
 	bool fastForward = false;
 	FPSLimit fpsLimit = FPSLimit::NORMAL;
+	int analogFpsLimit = 0;
 
 	bool updateRecent = true;
 

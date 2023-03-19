@@ -22,6 +22,7 @@
 #include "Common/Log.h"
 #include "Core/Core.h"
 #include "Core/Debugger/Breakpoints.h"
+#include "Core/Debugger/MemBlockInfo.h"
 #include "Core/Debugger/SymbolMap.h"
 #include "Core/Host.h"
 #include "Core/MemMap.h"
@@ -30,6 +31,7 @@
 #include "Core/MIPS/JitCommon/JitCommon.h"
 #include "Core/CoreTiming.h"
 
+std::atomic<bool> anyBreakPoints_(false);
 std::atomic<bool> anyMemChecks_(false);
 
 static std::mutex breakPointsMutex_;
@@ -69,7 +71,6 @@ BreakAction MemCheck::Action(u32 addr, bool write, int size, u32 pc, const char 
 		Log(addr, write, size, pc, reason);
 		if ((result & BREAK_ACTION_PAUSE) && coreState != CORE_POWERUP) {
 			Core_EnableStepping(true, "memory.breakpoint", start);
-			host->SetDebugMode(true);
 		}
 
 		return result;
@@ -125,8 +126,6 @@ void MemCheck::JitCleanup(bool changed)
 		CBreakPoints::SetSkipFirst(lastPC);
 		Core_EnableStepping(false);
 	}
-	else
-		host->SetDebugMode(true);
 }
 
 // Note: must lock while calling this.
@@ -162,6 +161,8 @@ size_t CBreakPoints::FindMemCheck(u32 start, u32 end)
 
 bool CBreakPoints::IsAddressBreakPoint(u32 addr)
 {
+	if (!anyBreakPoints_)
+		return false;
 	std::lock_guard<std::mutex> guard(breakPointsMutex_);
 	size_t bp = FindBreakpoint(addr);
 	return bp != INVALID_BREAKPOINT && breakPoints_[bp].result != BREAK_ACTION_IGNORE;
@@ -169,6 +170,8 @@ bool CBreakPoints::IsAddressBreakPoint(u32 addr)
 
 bool CBreakPoints::IsAddressBreakPoint(u32 addr, bool* enabled)
 {
+	if (!anyBreakPoints_)
+		return false;
 	std::lock_guard<std::mutex> guard(breakPointsMutex_);
 	size_t bp = FindBreakpoint(addr);
 	if (bp == INVALID_BREAKPOINT) return false;
@@ -186,6 +189,8 @@ bool CBreakPoints::IsTempBreakPoint(u32 addr)
 
 bool CBreakPoints::RangeContainsBreakPoint(u32 addr, u32 size)
 {
+	if (!anyBreakPoints_)
+		return false;
 	std::lock_guard<std::mutex> guard(breakPointsMutex_);
 	const u32 end = addr + size;
 	for (const auto &bp : breakPoints_)
@@ -209,6 +214,7 @@ void CBreakPoints::AddBreakPoint(u32 addr, bool temp)
 		pt.addr = addr;
 
 		breakPoints_.push_back(pt);
+		anyBreakPoints_ = true;
 		guard.unlock();
 		Update(addr);
 	}
@@ -234,6 +240,7 @@ void CBreakPoints::RemoveBreakPoint(u32 addr)
 		if (bp != INVALID_BREAKPOINT)
 			breakPoints_.erase(breakPoints_.begin() + bp);
 
+		anyBreakPoints_ = !breakPoints_.empty();
 		guard.unlock();
 		Update(addr);
 	}
@@ -269,6 +276,8 @@ void CBreakPoints::ChangeBreakPoint(u32 addr, BreakAction result)
 
 void CBreakPoints::ClearAllBreakPoints()
 {
+	if (!anyBreakPoints_)
+		return;
 	std::unique_lock<std::mutex> guard(breakPointsMutex_);
 	if (!breakPoints_.empty())
 	{
@@ -280,9 +289,9 @@ void CBreakPoints::ClearAllBreakPoints()
 
 void CBreakPoints::ClearTemporaryBreakPoints()
 {
-	std::unique_lock<std::mutex> guard(breakPointsMutex_);
-	if (breakPoints_.empty())
+	if (!anyBreakPoints_)
 		return;
+	std::unique_lock<std::mutex> guard(breakPointsMutex_);
 
 	bool update = false;
 	for (int i = (int)breakPoints_.size()-1; i >= 0; --i)
@@ -344,6 +353,8 @@ void CBreakPoints::ChangeBreakPointLogFormat(u32 addr, const std::string &fmt) {
 }
 
 BreakAction CBreakPoints::ExecBreakPoint(u32 addr) {
+	if (!anyBreakPoints_)
+		return BREAK_ACTION_IGNORE;
 	std::unique_lock<std::mutex> guard(breakPointsMutex_);
 	size_t bp = FindBreakpoint(addr, false);
 	if (bp != INVALID_BREAKPOINT) {
@@ -368,7 +379,6 @@ BreakAction CBreakPoints::ExecBreakPoint(u32 addr) {
 		}
 		if ((info.result & BREAK_ACTION_PAUSE) && coreState != CORE_POWERUP) {
 			Core_EnableStepping(true, "cpu.breakpoint", info.addr);
-			host->SetDebugMode(true);
 		}
 
 		return info.result;
@@ -393,7 +403,9 @@ void CBreakPoints::AddMemCheck(u32 start, u32 end, MemCheckCondition cond, Break
 		check.result = result;
 
 		memChecks_.push_back(check);
-		anyMemChecks_ = true;
+		bool hadAny = anyMemChecks_.exchange(true);
+		if (!hadAny)
+			MemBlockOverrideDetailed();
 		guard.unlock();
 		Update();
 	}
@@ -401,7 +413,9 @@ void CBreakPoints::AddMemCheck(u32 start, u32 end, MemCheckCondition cond, Break
 	{
 		memChecks_[mc].cond = (MemCheckCondition)(memChecks_[mc].cond | cond);
 		memChecks_[mc].result = (BreakAction)(memChecks_[mc].result | result);
-		anyMemChecks_ = true;
+		bool hadAny = anyMemChecks_.exchange(true);
+		if (!hadAny)
+			MemBlockOverrideDetailed();
 		guard.unlock();
 		Update();
 	}
@@ -417,7 +431,9 @@ void CBreakPoints::RemoveMemCheck(u32 start, u32 end)
 	if (mc != INVALID_MEMCHECK)
 	{
 		memChecks_.erase(memChecks_.begin() + mc);
-		anyMemChecks_ = !memChecks_.empty();
+		bool hadAny = anyMemChecks_.exchange(!memChecks_.empty());
+		if (hadAny)
+			MemBlockReleaseDetailed();
 		guard.unlock();
 		Update();
 	}
@@ -445,6 +461,9 @@ void CBreakPoints::ClearAllMemChecks()
 	if (!memChecks_.empty())
 	{
 		memChecks_.clear();
+		bool hadAny = anyMemChecks_.exchange(false);
+		if (hadAny)
+			MemBlockReleaseDetailed();
 		guard.unlock();
 		Update();
 	}
@@ -627,10 +646,12 @@ const std::vector<BreakPoint> CBreakPoints::GetBreakpoints()
 	return breakPoints_;
 }
 
-bool CBreakPoints::HasMemChecks()
-{
-	std::lock_guard<std::mutex> guard(memCheckMutex_);
-	return !memChecks_.empty();
+bool CBreakPoints::HasBreakPoints() {
+	return anyBreakPoints_;
+}
+
+bool CBreakPoints::HasMemChecks() {
+	return anyMemChecks_;
 }
 
 void CBreakPoints::Update(u32 addr) {
@@ -642,16 +663,11 @@ void CBreakPoints::Update(u32 addr) {
 			resume = true;
 		}
 
-		{
-			std::lock_guard<std::recursive_mutex> guard(MIPSComp::jitLock);
-			if (MIPSComp::jit) {
-				// In case this is a delay slot, clear the previous instruction too.
-				if (addr != 0)
-					MIPSComp::jit->InvalidateCacheAt(addr - 4, 8);
-				else
-					MIPSComp::jit->ClearCache();
-			}
-		}
+		// In case this is a delay slot, clear the previous instruction too.
+		if (addr != 0)
+			mipsr4k.InvalidateICache(addr - 4, 8);
+		else
+			mipsr4k.ClearJitCache();
 
 		if (resume)
 			Core_EnableStepping(false);

@@ -10,6 +10,7 @@
 #include "Common/Data/Text/Parsers.h"
 
 #include "Core/System.h"
+#include "SDL_vulkan.h"
 #include "SDLVulkanGraphicsContext.h"
 
 #if defined(VK_USE_PLATFORM_METAL_EXT)
@@ -32,7 +33,7 @@ static uint32_t FlagsFromConfig() {
 }
 
 bool SDLVulkanGraphicsContext::Init(SDL_Window *&window, int x, int y, int mode, std::string *error_message) {
-	window = SDL_CreateWindow("Initializing Vulkan...", x, y, pixel_xres, pixel_yres, mode);
+	window = SDL_CreateWindow("Initializing Vulkan...", x, y, g_display.pixel_xres, g_display.pixel_yres, mode);
 	if (!window) {
 		fprintf(stderr, "Error creating SDL window: %s\n", SDL_GetError());
 		exit(1);
@@ -72,6 +73,12 @@ bool SDLVulkanGraphicsContext::Init(SDL_Window *&window, int x, int y, int mode,
 		return false;
 	}
 
+	vulkan_->SetCbGetDrawSize([window]() {
+		int w=1,h=1;
+		SDL_Vulkan_GetDrawableSize(window, &w, &h);
+		return VkExtent2D {(uint32_t)w, (uint32_t)h};
+	});
+
 	SDL_SysWMinfo sys_info{};
 	SDL_VERSION(&sys_info.version); //Set SDL version
 	if (!SDL_GetWindowWMInfo(window, &sys_info)) {
@@ -104,6 +111,15 @@ bool SDLVulkanGraphicsContext::Init(SDL_Window *&window, int x, int y, int mode,
 		break;
 #endif
 #endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+	case WINDOWSYSTEM_DISPLAY:
+		/*
+		There is no problem passing null for the next two arguments, and reinit will be called later
+		huangzihan china
+		*/
+		vulkan_->InitSurface(WINDOWSYSTEM_DISPLAY, nullptr, nullptr);
+		break;
+#endif
 	default:
 		fprintf(stderr, "Vulkan subsystem %d not supported\n", sys_info.subsystem);
 		exit(1);
@@ -116,7 +132,7 @@ bool SDLVulkanGraphicsContext::Init(SDL_Window *&window, int x, int y, int mode,
 		return false;
 	}
 
-	draw_ = Draw::T3DCreateVulkanContext(vulkan_, false);
+	draw_ = Draw::T3DCreateVulkanContext(vulkan_);
 	SetGPUBackend(GPUBackend::VULKAN);
 	bool success = draw_->CreatePresets();
 	_assert_(success);

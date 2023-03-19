@@ -22,17 +22,31 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
+#include "Common/Data/Collections/Hashmaps.h"
 #include "GPU/Math3D.h"
 #include "GPU/Software/FuncId.h"
 #include "GPU/Software/RasterizerRegCache.h"
 
+class BinManager;
+
 namespace Rasterizer {
 
+// Our std::unordered_map argument will ignore the alignment attribute, but that doesn't matter.
+// We'll still have and want it for the actual function call, to keep the args in vector registers.
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
+
 typedef void (SOFTRAST_CALL *SingleFunc)(int x, int y, int z, int fog, Vec4IntArg color_in, const PixelFuncID &pixelID);
-SingleFunc GetSingleFunc(const PixelFuncID &id);
+SingleFunc GetSingleFunc(const PixelFuncID &id, BinManager *binner);
 
 void Init();
+void FlushJit();
 void Shutdown();
+
+bool CheckDepthTestPassed(GEComparison func, int x, int y, int stride, u16 z);
 
 bool DescribeCodePtr(const u8 *ptr, std::string &name);
 
@@ -40,6 +54,9 @@ struct PixelBlendState {
 	bool usesFactors = false;
 	bool usesDstAlpha = false;
 	bool dstFactorIsInverse = false;
+	bool srcColorAsFactor = false;
+	bool dstColorAsFactor = false;
+	bool readsDstPixel = true;
 };
 void ComputePixelBlendState(PixelBlendState &state, const PixelFuncID &id);
 
@@ -48,26 +65,25 @@ public:
 	PixelJitCache();
 
 	// Returns a pointer to the code to run.
-	SingleFunc GetSingle(const PixelFuncID &id);
+	SingleFunc GetSingle(const PixelFuncID &id, BinManager *binner);
 	SingleFunc GenericSingle(const PixelFuncID &id);
-	void Clear();
+	void Clear() override;
+	void Flush();
 
-	std::string DescribeCodePtr(const u8 *ptr);
+	std::string DescribeCodePtr(const u8 *ptr) override;
 
 private:
+	void Compile(const PixelFuncID &id);
 	SingleFunc CompileSingle(const PixelFuncID &id);
 
-#if PPSSPP_ARCH(ARM64)
-	Arm64Gen::ARM64FloatEmitter fp;
-#endif
-
-	RegCache::Reg GetGState();
-	RegCache::Reg GetConstBase();
-	RegCache::Reg GetZeroVec();
+	RegCache::Reg GetPixelID();
+	void UnlockPixelID(RegCache::Reg &r);
 	// Note: these may require a temporary reg.
 	RegCache::Reg GetColorOff(const PixelFuncID &id);
 	RegCache::Reg GetDepthOff(const PixelFuncID &id);
 	RegCache::Reg GetDestStencil(const PixelFuncID &id);
+
+	void WriteConstantPool(const PixelFuncID &id);
 
 	bool Jit_ApplyDepthRange(const PixelFuncID &id);
 	bool Jit_AlphaTest(const PixelFuncID &id);
@@ -81,7 +97,7 @@ private:
 	bool Jit_DepthTest(const PixelFuncID &id);
 	bool Jit_WriteDepth(const PixelFuncID &id);
 	bool Jit_AlphaBlend(const PixelFuncID &id);
-	bool Jit_BlendFactor(const PixelFuncID &id, RegCache::Reg factorReg, RegCache::Reg dstReg, GEBlendSrcFactor factor);
+	bool Jit_BlendFactor(const PixelFuncID &id, RegCache::Reg factorReg, RegCache::Reg dstReg, PixelBlendFactor factor);
 	bool Jit_DstBlendFactor(const PixelFuncID &id, RegCache::Reg srcFactorReg, RegCache::Reg dstFactorReg, RegCache::Reg dstReg);
 	bool Jit_Dither(const PixelFuncID &id);
 	bool Jit_WriteColor(const PixelFuncID &id);
@@ -93,9 +109,30 @@ private:
 	bool Jit_ConvertFrom5551(const PixelFuncID &id, RegCache::Reg colorReg, RegCache::Reg temp1Reg, RegCache::Reg temp2Reg, bool keepAlpha);
 	bool Jit_ConvertFrom4444(const PixelFuncID &id, RegCache::Reg colorReg, RegCache::Reg temp1Reg, RegCache::Reg temp2Reg, bool keepAlpha);
 
-	std::unordered_map<PixelFuncID, SingleFunc> cache_;
+	struct LastCache {
+		size_t key;
+		SingleFunc func;
+		int gen = -1;
+
+		bool Match(size_t k, int g) const {
+			return key == k && gen == g;
+		}
+
+		void Set(size_t k, SingleFunc f, int g) {
+			key = k;
+			func = f;
+			gen = g;
+		}
+	};
+
+	DenseHashMap<size_t, SingleFunc, nullptr> cache_;
 	std::unordered_map<PixelFuncID, const u8 *> addresses_;
-	RegCache regCache_;
+	std::unordered_set<PixelFuncID> compileQueue_;
+	static int clearGen_;
+	static thread_local LastCache lastSingle_;
+
+	const u8 *constBlendHalf_11_4s_ = nullptr;
+	const u8 *constBlendInvert_11_4s_ = nullptr;
 
 #if PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
 	void Discard();
@@ -109,5 +146,9 @@ private:
 	bool colorIs16Bit_ = false;
 #endif
 };
+
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 };

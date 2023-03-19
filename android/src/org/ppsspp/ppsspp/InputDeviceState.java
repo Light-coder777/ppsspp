@@ -128,6 +128,7 @@ public class InputDeviceState {
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
 			logAdvanced(device);
 		}
+		NativeApp.sendMessage("inputDeviceConnectedID", String.valueOf(this.deviceId));
 		NativeApp.sendMessage("inputDeviceConnected", device.getName());
 	}
 
@@ -146,13 +147,11 @@ public class InputDeviceState {
 		if ((event.getSource() & InputDevice.SOURCE_CLASS_JOYSTICK) == 0) {
 			return false;
 		}
-		NativeApp.beginJoystickEvent();
 		for (int i = 0; i < mAxes.length; i++) {
 			int axisId = mAxes[i];
 			float value = event.getAxisValue(axisId);
 			NativeApp.joystickAxis(deviceId, axisId, value);
 		}
-		NativeApp.endJoystickEvent();
 		return true;
 	}
 }

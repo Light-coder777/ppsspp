@@ -20,15 +20,15 @@
 
 #include "ppsspp_config.h"
 
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 #include "Common/CPUDetect.h"
 #include "Common/Data/Convert/ColorConv.h"
 #include "Common/Log.h"
+#include "Common/LogReporting.h"
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "Core/MemMap.h"
 #include "Core/HDRemaster.h"
-#include "Core/Reporting.h"
 #include "Core/MIPS/JitCommon/JitCommon.h"
 #include "Core/Util/AudioFormat.h"  // for clamp_u8
 #include "GPU/Common/ShaderCommon.h"
@@ -149,7 +149,7 @@ void GetIndexBounds(const void *inds, int count, u32 vertType, u16 *indexLowerBo
 	*indexUpperBound = (u16)upperBound;
 }
 
-void PrintDecodedVertex(VertexReader &vtx) {
+void PrintDecodedVertex(const VertexReader &vtx) {
 	if (vtx.hasNormal()) {
 		float nrm[3];
 		vtx.ReadNrm(nrm);
@@ -174,9 +174,6 @@ void PrintDecodedVertex(VertexReader &vtx) {
 	float pos[3];
 	vtx.ReadPos(pos);
 	printf("P: %f %f %f\n", pos[0], pos[1], pos[2]);
-}
-
-VertexDecoder::VertexDecoder() : decoded_(nullptr), ptr_(nullptr), jitted_(0), jittedSize_(0) {
 }
 
 void VertexDecoder::Step_WeightsU8() const
@@ -776,13 +773,20 @@ void VertexDecoder::Step_PosFloatSkin() const
 	Vec3ByMatrix43(pos, fn, skinMatrix);
 }
 
-void VertexDecoder::Step_PosS8Through() const
-{
+void VertexDecoder::Step_PosInvalid() const {
+	// Invalid positions are just culled.  Simulate by forcing invalid values.
 	float *v = (float *)(decoded_ + decFmt.posoff);
-	const s8 *sv = (const s8*)(ptr_ + posoff);
-	v[0] = sv[0];
-	v[1] = sv[1];
-	v[2] = sv[2];
+	v[0] = std::numeric_limits<float>::infinity();
+	v[1] = std::numeric_limits<float>::infinity();
+	v[2] = std::numeric_limits<float>::infinity();
+}
+
+void VertexDecoder::Step_PosS8Through() const {
+	// 8-bit positions in throughmode always decode to 0, depth included.
+	float *v = (float *)(decoded_ + decFmt.posoff);
+	v[0] = 0;
+	v[1] = 0;
+	v[2] = 0;
 }
 
 void VertexDecoder::Step_PosS16Through() const
@@ -797,9 +801,10 @@ void VertexDecoder::Step_PosS16Through() const
 
 void VertexDecoder::Step_PosFloatThrough() const
 {
-	u8 *v = (u8 *)(decoded_ + decFmt.posoff);
-	const u8 *fv = (const u8 *)(ptr_ + posoff);
-	memcpy(v, fv, 12);
+	float *v = (float *)(decoded_ + decFmt.posoff);
+	const float *fv = (const float *)(ptr_ + posoff);
+	memcpy(v, fv, 8);
+	v[2] = fv[2] > 65535.0f ? 65535.0f : (fv[2] < 0.0f ? 0.0f : fv[2]);
 }
 
 void VertexDecoder::Step_PosS8Morph() const
@@ -1024,35 +1029,35 @@ static const StepFunction nrmstep_morphskin[4] = {
 };
 
 static const StepFunction posstep[4] = {
-	&VertexDecoder::Step_PosS8,
+	&VertexDecoder::Step_PosInvalid,
 	&VertexDecoder::Step_PosS8,
 	&VertexDecoder::Step_PosS16,
 	&VertexDecoder::Step_PosFloat,
 };
 
 static const StepFunction posstep_skin[4] = {
-	&VertexDecoder::Step_PosS8Skin,
+	&VertexDecoder::Step_PosInvalid,
 	&VertexDecoder::Step_PosS8Skin,
 	&VertexDecoder::Step_PosS16Skin,
 	&VertexDecoder::Step_PosFloatSkin,
 };
 
 static const StepFunction posstep_morph[4] = {
-	&VertexDecoder::Step_PosS8Morph,
+	&VertexDecoder::Step_PosInvalid,
 	&VertexDecoder::Step_PosS8Morph,
 	&VertexDecoder::Step_PosS16Morph,
 	&VertexDecoder::Step_PosFloatMorph,
 };
 
 static const StepFunction posstep_morph_skin[4] = {
-	&VertexDecoder::Step_PosS8MorphSkin,
+	&VertexDecoder::Step_PosInvalid,
 	&VertexDecoder::Step_PosS8MorphSkin,
 	&VertexDecoder::Step_PosS16MorphSkin,
 	&VertexDecoder::Step_PosFloatMorphSkin,
 };
 
 static const StepFunction posstep_through[4] = {
-	&VertexDecoder::Step_PosS8Through,
+	&VertexDecoder::Step_PosInvalid,
 	&VertexDecoder::Step_PosS8Through,
 	&VertexDecoder::Step_PosS16Through,
 	&VertexDecoder::Step_PosFloatThrough,
@@ -1084,7 +1089,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		DEBUG_LOG(G3D, "VTYPE: THRU=%i TC=%i COL=%i POS=%i NRM=%i WT=%i NW=%i IDX=%i MC=%i", (int)throughmode, tc, col, pos, nrm, weighttype, nweights, idx, morphcount);
 	}
 
-	bool skinInDecode = weighttype != 0 && g_Config.bSoftwareSkinning;
+	skinInDecode = weighttype != 0 && options.applySkinInDecode;
 
 	if (weighttype) { // && nweights?
 		weightoff = size;
@@ -1225,9 +1230,8 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 	bool reportNoPos = false;
 	if (!pos) {
 		reportNoPos = true;
-		pos = 1;
 	}
-	if (pos) { // there's always a position
+	if (pos >= 0) { // there's always a position
 		size = align(size, posalign[pos]);
 		posoff = size;
 		size += possize[pos];
@@ -1250,7 +1254,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		decOff += DecFmtSize(decFmt.posfmt);
 	}
 
-	decFmt.stride = decOff;
+	decFmt.stride = options.alignOutputToWord ? align(decOff, 4) : decOff;
 
 	decFmt.ComputeID();
 
@@ -1265,9 +1269,12 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		ERROR_LOG_REPORT(G3D, "Vertices without position found: (%08x) %s", fmt_, temp);
 	}
 
+	_assert_msg_(decFmt.posfmt == DEC_FLOAT_3, "Reader only supports float pos");
+	_assert_msg_(decFmt.uvfmt == DEC_FLOAT_2 || decFmt.uvfmt == DEC_NONE, "Reader only supports float UV");
+
 	// Attempt to JIT as well. But only do that if the main CPU JIT is enabled, in order to aid
 	// debugging attempts - if the main JIT doesn't work, this one won't do any better, probably.
-	if (jitCache && g_Config.bVertexDecoderJit && g_Config.iCpuCore == (int)CPUCore::JIT) {
+	if (jitCache) {
 		jitted_ = jitCache->Compile(*this, &jittedSize_);
 		if (!jitted_) {
 			WARN_LOG(G3D, "Vertex decoder JIT failed! fmt = %08x (%s)", fmt_, GetString(SHADER_STRING_SHORT_DESC).c_str());
@@ -1352,6 +1359,8 @@ std::string VertexDecoder::GetString(DebugShaderStringType stringType) {
 			lines = DisassembleArm2((const u8 *)jitted_, jittedSize_);
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
 			lines = DisassembleX86((const u8 *)jitted_, jittedSize_);
+#elif PPSSPP_ARCH(RISCV64)
+			lines = DisassembleRV64((const u8 *)jitted_, jittedSize_);
 #else
 			// No disassembler defined
 #endif

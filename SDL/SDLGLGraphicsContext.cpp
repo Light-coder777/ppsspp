@@ -333,7 +333,7 @@ int SDLGLGraphicsContext::Init(SDL_Window *&window, int x, int y, int mode, std:
 		SetGLCoreContext(true);
 #endif
 
-		window = SDL_CreateWindow("PPSSPP", x, y, pixel_xres, pixel_yres, mode);
+		window = SDL_CreateWindow("PPSSPP", x, y, g_display.pixel_xres, g_display.pixel_yres, mode);
 		if (!window) {
 			// Definitely don't shutdown here: we'll keep trying more GL versions.
 			fprintf(stderr, "SDL_CreateWindow failed for GL %d.%d: %s\n", ver.major, ver.minor, SDL_GetError());
@@ -358,7 +358,7 @@ int SDLGLGraphicsContext::Init(SDL_Window *&window, int x, int y, int mode, std:
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 		SetGLCoreContext(false);
 
-		window = SDL_CreateWindow("PPSSPP", x, y, pixel_xres, pixel_yres, mode);
+		window = SDL_CreateWindow("PPSSPP", x, y, g_display.pixel_xres, g_display.pixel_yres, mode);
 		if (window == nullptr) {
 			NativeShutdown();
 			fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -394,7 +394,9 @@ int SDLGLGraphicsContext::Init(SDL_Window *&window, int x, int y, int mode, std:
 	if (gl_extensions.IsCoreContext) {
 		glewExperimental = true;
 	}
-	if (GLEW_OK != glewInit()) {
+	GLenum glew_err = glewInit();
+	// glx is not required, igore.
+	if (glew_err != GLEW_OK && glew_err != GLEW_ERROR_NO_GLX_DISPLAY) {
 		printf("Failed to initialize glew!\n");
 		return 1;
 	}
@@ -427,7 +429,7 @@ int SDLGLGraphicsContext::Init(SDL_Window *&window, int x, int y, int mode, std:
 #else
 		SDL_GL_SwapWindow(window_);
 #endif
-	});
+	}, false);
 
 	renderManager_->SetSwapIntervalFunction([&](int interval) {
 		INFO_LOG(G3D, "SDL SwapInterval: %d", interval);

@@ -523,6 +523,9 @@
     <ClCompile Include="Dialog\PSPNetconfDialog.cpp">
       <Filter>Dialog</Filter>
     </ClCompile>
+    <ClCompile Include="Dialog\PSPNpSigninDialog.cpp">
+      <Filter>Dialog</Filter>
+    </ClCompile>
     <ClCompile Include="Debugger\DisassemblyManager.cpp">
       <Filter>Debugger</Filter>
     </ClCompile>
@@ -576,9 +579,6 @@
     </ClCompile>
     <ClCompile Include="HLE\sceSha256.cpp">
       <Filter>HLE\Libraries</Filter>
-    </ClCompile>
-    <ClCompile Include="Util\AudioFormatNEON.cpp">
-      <Filter>Util</Filter>
     </ClCompile>
     <ClCompile Include="Util\AudioFormat.cpp">
       <Filter>Util</Filter>
@@ -652,9 +652,6 @@
     <ClCompile Include="FileLoaders\RamCachingFileLoader.cpp">
       <Filter>FileLoaders</Filter>
     </ClCompile>
-    <ClCompile Include="TextureReplacer.cpp">
-      <Filter>Core</Filter>
-    </ClCompile>
     <ClCompile Include="MIPS\IR\IRAsm.cpp">
       <Filter>MIPS\IR</Filter>
     </ClCompile>
@@ -694,7 +691,6 @@
     <ClCompile Include="AVIDump.cpp">
       <Filter>Core</Filter>
     </ClCompile>
-    <ClCompile Include="WaveFile.cpp" />
     <ClCompile Include="HLE\KUBridge.cpp">
       <Filter>HLE\Libraries</Filter>
     </ClCompile>
@@ -1184,6 +1180,21 @@
     <ClCompile Include="Debugger\WebSocket\GPUStatsSubscriber.cpp">
       <Filter>Debugger\WebSocket</Filter>
     </ClCompile>
+    <ClCompile Include="HW\Display.cpp">
+      <Filter>HW</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceNp2.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="WaveFile.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\riscv-disas.cpp">
+      <Filter>Ext</Filter>
+    </ClCompile>
+    <ClCompile Include="TiltEventProcessor.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ELF\ElfReader.h">
@@ -1597,6 +1608,9 @@
     <ClInclude Include="Dialog\PSPNetconfDialog.h">
       <Filter>Dialog</Filter>
     </ClInclude>
+    <ClInclude Include="Dialog\PSPNpSigninDialog.h">
+      <Filter>Dialog</Filter>
+    </ClInclude>
     <ClInclude Include="MIPS\JitCommon\JitState.h">
       <Filter>MIPS\JitCommon</Filter>
     </ClInclude>
@@ -1660,9 +1674,6 @@
     <ClInclude Include="Util\AudioFormat.h">
       <Filter>Util</Filter>
     </ClInclude>
-    <ClInclude Include="Util\AudioFormatNEON.h">
-      <Filter>Util</Filter>
-    </ClInclude>
     <ClInclude Include="..\ext\sfmt19937\SFMT.h">
       <Filter>Ext\sfmt19937</Filter>
     </ClInclude>
@@ -1723,9 +1734,6 @@
     <ClInclude Include="FileLoaders\RamCachingFileLoader.h">
       <Filter>FileLoaders</Filter>
     </ClInclude>
-    <ClInclude Include="TextureReplacer.h">
-      <Filter>Core</Filter>
-    </ClInclude>
     <ClInclude Include="MIPS\IR\IRJit.h">
       <Filter>MIPS\IR</Filter>
     </ClInclude>
@@ -1747,7 +1755,6 @@
     <ClInclude Include="AVIDump.h">
       <Filter>Core</Filter>
     </ClInclude>
-    <ClInclude Include="WaveFile.h" />
     <ClInclude Include="HLE\KUBridge.h">
       <Filter>HLE\Libraries</Filter>
     </ClInclude>
@@ -1910,11 +1917,24 @@
     <ClInclude Include="Debugger\WebSocket\GPUStatsSubscriber.h">
       <Filter>Debugger\WebSocket</Filter>
     </ClInclude>
+    <ClInclude Include="HW\Display.h">
+      <Filter>HW</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceNp2.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="WaveFile.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\riscv-disas.h">
+      <Filter>Ext</Filter>
+    </ClInclude>
+    <ClInclude Include="TiltEventProcessor.h">
+      <Filter>Core</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="CMakeLists.txt" />
     <None Include="..\LICENSE.TXT" />
-    <None Include="..\android\jni\Android.mk" />
     <None Include="..\ext\gason\LICENSE">
       <Filter>Ext\gason</Filter>
     </None>
@@ -1934,6 +1954,9 @@
     </Text>
     <Text Include="..\ext\libzip\CMakeLists.txt">
       <Filter>Ext\libzip</Filter>
+    </Text>
+    <Text Include="..\ext\CMakeLists.txt">
+      <Filter>Ext</Filter>
     </Text>
   </ItemGroup>
 </Project>

@@ -29,6 +29,7 @@
 #include "Common/CommonFuncs.h"
 #include "Common/SysError.h"
 #include "Core/Config.h"
+#include "Core/HLE/Plugins.h"
 
 #ifndef HID_USAGE_PAGE_GENERIC
 #define HID_USAGE_PAGE_GENERIC         ((USHORT) 0x01)
@@ -251,7 +252,7 @@ namespace WindowsRawInput {
 		return windowsTransTable[vKey];
 	}
 
-	void ProcessKeyboard(RAWINPUT *raw, bool foreground) {
+	void ProcessKeyboard(const RAWINPUT *raw, bool foreground) {
 		if (menuActive && UpdateMenuActive()) {
 			// Ignore keyboard input while a menu is active, it's probably interacting with the menu.
 			return;
@@ -302,7 +303,7 @@ namespace WindowsRawInput {
 		return true;
 	}
 
-	void ProcessMouse(HWND hWnd, RAWINPUT *raw, bool foreground) {
+	void ProcessMouse(HWND hWnd, const RAWINPUT *raw, bool foreground) {
 		if (menuActive && UpdateMenuActive()) {
 			// Ignore mouse input while a menu is active, it's probably interacting with the menu.
 			return;
@@ -319,6 +320,9 @@ namespace WindowsRawInput {
 
 		g_mouseDeltaX += raw->data.mouse.lLastX;
 		g_mouseDeltaY += raw->data.mouse.lLastY;
+
+		HLEPlugins::PluginDataAxis[JOYSTICK_AXIS_MOUSE_REL_X] = g_mouseDeltaX;
+		HLEPlugins::PluginDataAxis[JOYSTICK_AXIS_MOUSE_REL_Y] = g_mouseDeltaY;
 
 		const int rawInputDownID[5] = {
 			RI_MOUSE_LEFT_BUTTON_DOWN,
@@ -379,15 +383,21 @@ namespace WindowsRawInput {
 	}
 
 	LRESULT Process(HWND hWnd, WPARAM wParam, LPARAM lParam) {
-		UINT dwSize;
+		UINT dwSize = 0;
 		GetRawInputData((HRAWINPUT)lParam, RID_INPUT, NULL, &dwSize, sizeof(RAWINPUTHEADER));
 		if (!rawInputBuffer) {
 			rawInputBuffer = malloc(dwSize);
+			if (!rawInputBuffer)
+				return DefWindowProc(hWnd, WM_INPUT, wParam, lParam);
 			memset(rawInputBuffer, 0, dwSize);
 			rawInputBufferSize = dwSize;
 		}
 		if (dwSize > rawInputBufferSize) {
-			rawInputBuffer = realloc(rawInputBuffer, dwSize);
+			void *newBuf = realloc(rawInputBuffer, dwSize);
+			if (!newBuf)
+				return DefWindowProc(hWnd, WM_INPUT, wParam, lParam);
+			rawInputBuffer = newBuf;
+			rawInputBufferSize = dwSize;
 			memset(rawInputBuffer, 0, dwSize);
 		}
 		GetRawInputData((HRAWINPUT)lParam, RID_INPUT, rawInputBuffer, &dwSize, sizeof(RAWINPUTHEADER));

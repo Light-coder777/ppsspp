@@ -21,7 +21,7 @@
 #include "Core/Debugger/WebSocket/InputSubscriber.h"
 #include "Core/Debugger/WebSocket/WebSocketUtils.h"
 #include "Core/HLE/sceCtrl.h"
-#include "Core/HLE/sceDisplay.h"
+#include "Core/HW/Display.h"
 
 // This is also used in InputBroadcaster.
 const std::unordered_map<std::string, uint32_t> buttonLookup = {
@@ -227,7 +227,7 @@ static bool AnalogValue(DebuggerRequest &req, float *value, const char *name) {
 	}
 
 	double val = node->value.toNumber();
-	if (val < 1.0 || val > 1.0) {
+	if (val < -1.0 || val > 1.0) {
 		req.Fail(StringFromFormat("Parameter '%s' must be between -1.0 and 1.0", name));
 		return false;
 	}

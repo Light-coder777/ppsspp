@@ -43,6 +43,7 @@
 #include "UI/MiscScreens.h"
 #include "UI/MainScreen.h"
 #include "UI/BackgroundAudio.h"
+#include "UI/SavedataScreen.h"
 #include "Core/Reporting.h"
 
 GameScreen::GameScreen(const Path &gamePath) : UIDialogScreenWithGameBackground(gamePath) {
@@ -111,7 +112,8 @@ void GameScreen::CreateViews() {
 
 		tvTitle_ = infoLayout->Add(new TextView(info->GetTitle(), ALIGN_LEFT | FLAG_WRAP_TEXT, false, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
 		tvTitle_->SetShadow(true);
-		infoLayout->Add(new Spacer(12));
+		tvID_ = infoLayout->Add(new TextView("", ALIGN_LEFT | FLAG_WRAP_TEXT, true, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
+		tvID_->SetShadow(true);
 		// This one doesn't need to be updated.
 		infoLayout->Add(new TextView(gamePath_.ToVisualString(), ALIGN_LEFT | FLAG_WRAP_TEXT, true, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)))->SetShadow(true);
 		tvGameSize_ = infoLayout->Add(new TextView("...", ALIGN_LEFT, true, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
@@ -133,6 +135,7 @@ void GameScreen::CreateViews() {
 		tvInstallDataSize_ = nullptr;
 		tvRegion_ = nullptr;
 		tvCRC_ = nullptr;
+		tvID_ = nullptr;
 	}
 
 	ViewGroup *rightColumn = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(300, FILL_PARENT, actionMenuMargins));
@@ -187,6 +190,10 @@ void GameScreen::CreateViews() {
 		case IdentifiedFileType::PSP_ISO_NP:
 		case IdentifiedFileType::PSP_ISO:
 			fileTypeSupportCRC = true;
+			break;
+
+		default:
+			break;
 		}
 	}
 
@@ -236,7 +243,7 @@ UI::EventReturn GameScreen::OnDeleteConfig(UI::EventParams &e)
 	auto di = GetI18NCategory("Dialog");
 	auto ga = GetI18NCategory("Game");
 	screenManager()->push(
-		new PromptScreen(di->T("DeleteConfirmGameConfig", "Do you really want to delete the settings for this game?"), ga->T("ConfirmDelete"), di->T("Cancel"),
+		new PromptScreen(gamePath_, di->T("DeleteConfirmGameConfig", "Do you really want to delete the settings for this game?"), ga->T("ConfirmDelete"), di->T("Cancel"),
 		std::bind(&GameScreen::CallbackDeleteConfig, this, std::placeholders::_1)));
 
 	return UI::EVENT_DONE;
@@ -252,7 +259,7 @@ void GameScreen::render() {
 	std::shared_ptr<GameInfo> info = g_gameInfoCache->GetInfo(thin3d, gamePath_, GAMEINFO_WANTBG | GAMEINFO_WANTSIZE);
 
 	if (tvTitle_) {
-		tvTitle_->SetText(info->GetTitle() + " (" + info->id + ")");
+		tvTitle_->SetText(info->GetTitle());
 	}
 
 	if (info->gameSize) {
@@ -291,8 +298,12 @@ void GameScreen::render() {
 	if (tvCRC_ && Reporting::HasCRC(gamePath_)) {
 		auto rp = GetI18NCategory("Reporting");
 		std::string crc = StringFromFormat("%08X", Reporting::RetrieveCRC(gamePath_));
-		tvCRC_->SetText(ReplaceAll(rp->T("FeedbackCRCValue", "Disc CRC: [VALUE]"), "[VALUE]", crc));
+		tvCRC_->SetText(ReplaceAll(rp->T("FeedbackCRCValue", "Disc CRC: %1"), "%1", crc));
 		tvCRC_->SetVisibility(UI::V_VISIBLE);
+	}
+
+	if (tvID_) {
+		tvID_->SetText(ReplaceAll(info->id_version, "_", " v"));
 	}
 
 	if (!info->id.empty()) {
@@ -348,7 +359,7 @@ UI::EventReturn GameScreen::OnGameSettings(UI::EventParams &e) {
 	std::shared_ptr<GameInfo> info = g_gameInfoCache->GetInfo(NULL, gamePath_, GAMEINFO_WANTBG | GAMEINFO_WANTSIZE);
 	if (info && info->paramSFOLoaded) {
 		std::string discID = info->paramSFO.GetValueString("DISC_ID");
-		if ((discID.empty() || !info->disc_total) && gamePath_.FilePathContains("PSP/GAME/"))
+		if ((discID.empty() || !info->disc_total) && gamePath_.FilePathContainsNoCase("PSP/GAME/"))
 			discID = g_paramSFO.GenerateFakeID(gamePath_.ToString());
 		screenManager()->push(new GameSettingsScreen(gamePath_, discID, true));
 	}
@@ -363,7 +374,7 @@ UI::EventReturn GameScreen::OnDeleteSaveData(UI::EventParams &e) {
 		// Check that there's any savedata to delete
 		if (saveDirs.size()) {
 			screenManager()->push(
-				new PromptScreen(di->T("DeleteConfirmAll", "Do you really want to delete all\nyour save data for this game?"), ga->T("ConfirmDelete"), di->T("Cancel"),
+				new PromptScreen(gamePath_, di->T("DeleteConfirmAll", "Do you really want to delete all\nyour save data for this game?"), ga->T("ConfirmDelete"), di->T("Cancel"),
 				std::bind(&GameScreen::CallbackDeleteSaveData, this, std::placeholders::_1)));
 		}
 	}
@@ -387,7 +398,7 @@ UI::EventReturn GameScreen::OnDeleteGame(UI::EventParams &e) {
 	std::shared_ptr<GameInfo> info = g_gameInfoCache->GetInfo(NULL, gamePath_, GAMEINFO_WANTBG | GAMEINFO_WANTSIZE);
 	if (info) {
 		screenManager()->push(
-			new PromptScreen(di->T("DeleteConfirmGame", "Do you really want to delete this game\nfrom your device? You can't undo this."), ga->T("ConfirmDelete"), di->T("Cancel"),
+			new PromptScreen(gamePath_, di->T("DeleteConfirmGame", "Do you really want to delete this game\nfrom your device? You can't undo this."), ga->T("ConfirmDelete"), di->T("Cancel"),
 			std::bind(&GameScreen::CallbackDeleteGame, this, std::placeholders::_1)));
 	}
 
@@ -416,8 +427,8 @@ bool GameScreen::isRecentGame(const Path &gamePath) {
 		return false;
 
 	const std::string resolved = File::ResolvePath(gamePath.ToString());
-	for (auto it = g_Config.recentIsos.begin(); it != g_Config.recentIsos.end(); ++it) {
-		const std::string recent = File::ResolvePath(*it);
+	for (auto iso : g_Config.RecentIsos()) {
+		const std::string recent = File::ResolvePath(iso);
 		if (resolved == recent)
 			return true;
 	}
@@ -433,6 +444,7 @@ UI::EventReturn GameScreen::OnRemoveFromRecent(UI::EventParams &e) {
 class SetBackgroundPopupScreen : public PopupScreen {
 public:
 	SetBackgroundPopupScreen(const std::string &title, const Path &gamePath);
+	const char *tag() const override { return "SetBackgroundPopup"; }
 
 protected:
 	bool FillVertical() const override { return false; }

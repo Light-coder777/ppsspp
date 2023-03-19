@@ -196,34 +196,32 @@ BEGIN
     CONTROL         "",IDC_DEBUG_BOTTOMTABS,"SysTabControl32",TCS_TABS | TCS_FOCUSNEVER,1,338,513,93
 END
 
-IDD_GEDEBUGGER DIALOGEX 0, 0, 500, 400
+IDD_GEDEBUGGER DIALOGEX 0, 0, 490, 400
 STYLE DS_SETFONT | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
 EXSTYLE WS_EX_ACCEPTFILES | WS_EX_TOOLWINDOW
 CAPTION "GE"
 FONT 8, "MS Shell Dlg", 0, 0, 0x1
 BEGIN
-    PUSHBUTTON      "Step &Frame",IDC_GEDBG_STEPFRAME,10,2,44,14
-    PUSHBUTTON      "Step &Tex",IDC_GEDBG_STEPTEX,55,2,44,14
-    PUSHBUTTON      "Step &Draw",IDC_GEDBG_STEPDRAW,100,2,44,14
-    PUSHBUTTON      "Step &Prim",IDC_GEDBG_STEPPRIM,145,2,44,14
-    PUSHBUTTON      "Step &Curve",IDC_GEDBG_STEPCURVE,190,2,44,14
-    PUSHBUTTON      "Step &Into",IDC_GEDBG_STEP,235,2,44,14
-    PUSHBUTTON      "Step Cou&nt",IDC_GEDBG_STEPCOUNT,280,2,44,14
-    EDITTEXT        IDC_GEDBG_PRIMCOUNTER,325,4,50,12,ES_READONLY | NOT WS_BORDER
-    PUSHBUTTON      "&Resume",IDC_GEDBG_RESUME,396,2,44,14
-    PUSHBUTTON      "Rec&ord",IDC_GEDBG_RECORD,444,2,44,14
+    PUSHBUTTON      "Step &Frame",IDC_GEDBG_STEPVSYNC,10,2,44,14
+    PUSHBUTTON      "Step &Tex",IDC_GEDBG_STEPTEX,60,2,44,14
+    PUSHBUTTON      "Step &Draw",IDC_GEDBG_STEPDRAW,105,2,44,14
+    PUSHBUTTON      "Step &Prim",IDC_GEDBG_STEPPRIM,150,2,44,14
+    PUSHBUTTON      "Step &Into",IDC_GEDBG_STEP,200,2,44,14
+    PUSHBUTTON      "Step Cou&nt",IDC_GEDBG_STEPCOUNT,245,2,44,14
+    EDITTEXT        IDC_GEDBG_PRIMCOUNTER,290,4,50,12,ES_READONLY | NOT WS_BORDER
+    PUSHBUTTON      "&Resume",IDC_GEDBG_RESUME,444,2,44,14
     CONTROL         "",IDC_GEDBG_TEX,"SimpleGLWindow",WS_CHILD | WS_VISIBLE,10,20,128,128
     CONTROL         "",IDC_GEDBG_FRAME,"SimpleGLWindow",WS_CHILD | WS_VISIBLE,148,20,256,136
-    CONTROL         "",IDC_GEDBG_MAINTAB,"SysTabControl32",TCS_TABS | TCS_FOCUSNEVER,10,216,480,180
+    CONTROL         "",IDC_GEDBG_TOPRIGHTTAB,"SysTabControl32",TCS_TABS | TCS_FOCUSNEVER,500,20,280,136
+    CONTROL         "",IDC_GEDBG_MAINTAB,"SysTabControl32",TCS_TABS | TCS_FOCUSNEVER,10,216,280,180
+    CONTROL         "",IDC_GEDBG_RIGHTTAB,"SysTabControl32",TCS_TABS | TCS_FOCUSNEVER,210,216,280,180
     EDITTEXT        IDC_GEDBG_FRAMEBUFADDR,148,192,200,12,ES_READONLY | NOT WS_BORDER
     EDITTEXT        IDC_GEDBG_TEXADDR,10,152,128,12,ES_READONLY | NOT WS_BORDER
     CONTROL         "Force opaque",IDC_GEDBG_FORCEOPAQUE,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,164,60,12
     CONTROL         "Show CLUT",IDC_GEDBG_SHOWCLUT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,90,164,50,12
-    PUSHBUTTON      "Break on Te&xture...",IDC_GEDBG_BREAKTEX,24,176,100,14
-    PUSHBUTTON      "Level -",IDC_GEDBG_TEXLEVELDOWN,24,192,40,14
-    PUSHBUTTON      "Level +",IDC_GEDBG_TEXLEVELUP,84,192,40,14
+    PUSHBUTTON      "Level -",IDC_GEDBG_TEXLEVELDOWN,24,184,40,14
+    PUSHBUTTON      "Level +",IDC_GEDBG_TEXLEVELUP,84,184,40,14
     CONTROL         "",IDC_GEDBG_FBTABS,"SysTabControl32",TCS_BUTTONS | TCS_FOCUSNEVER,384,192,110,12
-    PUSHBUTTON      "Break on Target...",IDC_GEDBG_BREAKTARGET,394,211,100,14
 END
 
 IDD_GEDBG_STEPCOUNT DIALOGEX 0, 0, 124, 18
@@ -314,7 +312,7 @@ BEGIN
     AUTOCHECKBOX    "Show Offsets",IDC_SHOWOFFSETS,300,9,55,8
     COMBOBOX        IDC_REGIONS,95,5,88,139,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    LISTBOX         IDC_SEARCH_RESULTS,557,14,140,272,LBS_SORT | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP
+    LISTBOX         IDC_SEARCH_RESULTS,557,14,140,272,LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP
 
     EDITTEXT        IDC_SEARCH_BOX,397,6,100,13,ES_AUTOHSCROLL
     PUSHBUTTON      "Search",IDC_BUTTON_SEARCH,504,5,50,14
@@ -458,6 +456,7 @@ IDI_PPSSPP              ICON                    "ppsspp.ico"
 #endif
 IDI_STOP                ICON                    "icon1.ico"
 IDI_STOPDISABLE         ICON                    "stop1.ico"
+IDI_BREAKPOINT_SMALL    ICON                    "BreakpointSmall.ico"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -538,6 +537,7 @@ BEGIN
         MENUITEM "GE Debugger...",                          ID_DEBUG_GEDEBUGGER
         MENUITEM "Extract File...",                         ID_DEBUG_EXTRACTFILE
         MENUITEM "Log Console",                             ID_DEBUG_LOG
+        MENUITEM "Copy PSP memory base pointer",             ID_DEBUG_MEMORYBASE
         MENUITEM "Memory View...",                          ID_DEBUG_MEMORYVIEW
     END
 
@@ -548,15 +548,12 @@ BEGIN
         MENUITEM "Ignore Windows Key",                      ID_OPTIONS_IGNOREWINKEY
         MENUITEM "Language...",                             ID_OPTIONS_LANGUAGE
         MENUITEM "Control Mapping...",                      ID_OPTIONS_CONTROLS
-        MENUITEM "Display Layout Editor",                   ID_OPTIONS_DISPLAY_LAYOUT
+        MENUITEM "Display Layout && Effects",               ID_OPTIONS_DISPLAY_LAYOUT
         MENUITEM "More Settings...",                        ID_OPTIONS_MORE_SETTINGS
         MENUITEM "", 0, MFT_SEPARATOR
         MENUITEM "Fullscreen",                              ID_OPTIONS_FULLSCREEN
         MENUITEM "VSync",                                   ID_OPTIONS_VSYNC
-        POPUP "Postprocessing Shader",                      ID_OPTIONS_SHADER_MENU
-        BEGIN
-            MENUITEM "", 0, MFT_SEPARATOR
-        END
+        MENUITEM "Skip Buffer Effects",                     ID_OPTIONS_SKIP_BUFFER_EFFECTS
         POPUP "Rendering Resolution",                       ID_OPTIONS_SCREEN_MENU
         BEGIN
             MENUITEM "Auto",                                ID_OPTIONS_SCREENAUTO
@@ -593,11 +590,7 @@ BEGIN
             MENUITEM "Vulkan",                              ID_OPTIONS_VULKAN
         END
 
-        POPUP "Rendering Mode",                             ID_OPTIONS_RENDERMODE_MENU
-        BEGIN
-            MENUITEM "Non-Buffered Rendering",              ID_OPTIONS_NONBUFFEREDRENDERING
-            MENUITEM "Buffered Rendering",                  ID_OPTIONS_BUFFEREDRENDERING
-        END
+
         POPUP "Frame Skipping",                             ID_OPTIONS_FRAMESKIP_MENU
         BEGIN
             MENUITEM "Auto",                                ID_OPTIONS_FRAMESKIP_AUTO
@@ -647,7 +640,6 @@ BEGIN
         END
         MENUITEM "Hardware Transform",                  ID_OPTIONS_HARDWARETRANSFORM
         MENUITEM "Vertex Cache",                        ID_OPTIONS_VERTEXCACHE
-        MENUITEM "Show FPS Counter",                    ID_OPTIONS_SHOWFPS
         MENUITEM "", 0, MFT_SEPARATOR
         MENUITEM "Enable Sound",                        ID_EMULATION_SOUND
         MENUITEM "", 0, MFT_SEPARATOR
@@ -659,6 +651,39 @@ BEGIN
     POPUP "Help",                                       ID_HELP_MENU
     BEGIN
         MENUITEM "", 0, MFT_SEPARATOR
+    END
+END
+
+IDR_GEDBG_MENU MENUEX
+BEGIN
+    POPUP "&Actions",                                      ID_GEDBG_ACTIONS_MENU
+    BEGIN
+        MENUITEM "Rec&ord Next Frame",                     IDC_GEDBG_RECORD
+        MENUITEM "F&lush Pending Draws",                   IDC_GEDBG_FLUSH
+        MENUITEM "", 0, MFT_SEPARATOR
+        MENUITEM "Fi&lter Prims",                          IDC_GEDBG_SETPRIMFILTER
+    END
+
+    POPUP "&Step",                                         ID_GEDBG_STEP_MENU
+    BEGIN
+        MENUITEM "Next &Instruction",                      IDC_GEDBG_STEP
+        MENUITEM "To Cou&nter...",                         IDC_GEDBG_STEPCOUNT
+        MENUITEM "Next &Primitive",                        IDC_GEDBG_STEPPRIM
+        MENUITEM "Next &Curve",                            IDC_GEDBG_STEPCURVE
+        MENUITEM "Next &Texture",                          IDC_GEDBG_STEPTEX
+        MENUITEM "Next &Draw Flush",                       IDC_GEDBG_STEPDRAW
+        MENUITEM "Next Display &Framebuf",                 IDC_GEDBG_STEPFRAME
+        MENUITEM "Next &Vsync Frame",                      IDC_GEDBG_STEPVSYNC
+        MENUITEM "", 0, MFT_SEPARATOR
+        MENUITEM "&Auto Flush Pending",                    IDC_GEDBG_FLUSHAUTO
+    END
+
+    POPUP "&Breakpoints",                                  ID_GEDBG_BREAK_MENU
+    BEGIN
+        MENUITEM "&Resume",                                IDC_GEDBG_RESUME
+        MENUITEM "", 0, MFT_SEPARATOR
+        MENUITEM "Te&xture Pointer...",                    IDC_GEDBG_BREAKTEX
+        MENUITEM "Render Tar&get Pointer...",              IDC_GEDBG_BREAKTARGET
     END
 END
 
@@ -696,6 +721,7 @@ BEGIN
         MENUITEM "Rename Function...",         ID_DISASM_RENAMEFUNCTION
         MENUITEM "Remove Function",            ID_DISASM_REMOVEFUNCTION
         MENUITEM "Add Function Here",          ID_DISASM_ADDFUNCTION
+        MENUITEM "NOP instruction(s)",         ID_DISASM_NOPINSTRUCTION
     END
     POPUP "reglist"
     BEGIN
@@ -731,6 +757,7 @@ BEGIN
         MENUITEM "Jump to Cursor",             ID_DISASM_SETPCTOHERE
         MENUITEM "Set Stall",                  ID_GEDBG_SETSTALLADDR
         MENUITEM "Toggle Breakpoint",          ID_DISASM_TOGGLEBREAKPOINT
+        MENUITEM "Set Breakpoint Condition",   ID_GEDBG_SETCOND
         MENUITEM SEPARATOR
         MENUITEM "Go to Displaylist PC",       ID_GEDBG_GOTOPC
         MENUITEM "Go to Address...",           ID_GEDBG_GOTOADDR
@@ -745,12 +772,33 @@ BEGIN
         MENUITEM "Copy Entire Tab (Formatted)",ID_GEDBG_COPYALL
         MENUITEM SEPARATOR
         MENUITEM "Toggle Breakpoint",          ID_DISASM_TOGGLEBREAKPOINT
+        MENUITEM "Set Breakpoint Condition",   ID_GEDBG_SETCOND
         MENUITEM "Add Watch",                  ID_GEDBG_WATCH
     END
     POPUP "gepreviewoptions"
     BEGIN
         MENUITEM "Export Image...",            ID_GEDBG_EXPORT_IMAGE
+        MENUITEM "Copy Opaque Image",          ID_GEDBG_COPY_IMAGE
+        MENUITEM "Copy Image With Alpha",      ID_GEDBG_COPY_IMAGE_ALPHA
+        MENUITEM "Track Pixel",                ID_GEDBG_TRACK_PIXEL
+        MENUITEM "Stop Tracking Pixel",        ID_GEDBG_TRACK_PIXEL_STOP
         MENUITEM "Show Prim Preview",          ID_GEDBG_ENABLE_PREVIEW
+    END
+    POPUP "matrixoptions"
+    BEGIN
+        MENUITEM "Change...",                  ID_REGLIST_CHANGE
+        MENUITEM SEPARATOR
+        MENUITEM "Copy Value",                 ID_DISASM_COPYINSTRUCTIONDISASM
+        MENUITEM "Copy Entire Tab (Formatted)",ID_GEDBG_COPYALL
+        MENUITEM SEPARATOR
+        MENUITEM "Toggle Breakpoint",          ID_DISASM_TOGGLEBREAKPOINT
+        MENUITEM "Set Breakpoint Condition",   ID_GEDBG_SETCOND
+    END
+    POPUP "getaboptions"
+    BEGIN
+        MENUITEM "Show in &Left Pane"          ID_GEDBG_SHOWONLEFT
+        MENUITEM "Show in &Right Pane"         ID_GEDBG_SHOWONRIGHT
+        MENUITEM "Show in &Top Right Pane"     ID_GEDBG_SHOWONTOPRIGHT
     END
 END
 

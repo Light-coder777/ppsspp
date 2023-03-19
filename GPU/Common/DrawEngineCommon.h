@@ -23,6 +23,7 @@
 #include "Common/Data/Collections/Hashmaps.h"
 
 #include "GPU/GPUState.h"
+#include "GPU/Common/GPUStateUtils.h"
 #include "GPU/Common/GPUDebugInterface.h"
 #include "GPU/Common/IndexGenerator.h"
 #include "GPU/Common/VertexDecoderCommon.h"
@@ -35,10 +36,26 @@ enum {
 	DECODED_INDEX_BUFFER_SIZE = VERTEX_BUFFER_MAX * 16,
 };
 
-inline uint32_t GetVertTypeID(uint32_t vertType, int uvGenMode) {
+enum {
+	TEX_SLOT_PSP_TEXTURE = 0,
+	TEX_SLOT_SHADERBLEND_SRC = 1,
+	TEX_SLOT_ALPHATEST = 2,
+	TEX_SLOT_CLUT = 3,
+	TEX_SLOT_SPLINE_POINTS = 4,
+	TEX_SLOT_SPLINE_WEIGHTS_U = 5,
+	TEX_SLOT_SPLINE_WEIGHTS_V = 6,
+};
+
+enum FBOTexState {
+	FBO_TEX_NONE,
+	FBO_TEX_COPY_BIND_TEX,
+	FBO_TEX_READ_FRAMEBUFFER,
+};
+
+inline uint32_t GetVertTypeID(uint32_t vertType, int uvGenMode, bool skinInDecode) {
 	// As the decoder depends on the UVGenMode when we use UV prescale, we simply mash it
 	// into the top of the verttype where there are unused bits.
-	return (vertType & 0xFFFFFF) | (uvGenMode << 24);
+	return (vertType & 0xFFFFFF) | (uvGenMode << 24) | (skinInDecode << 26);
 }
 
 struct SimpleVertex;
@@ -57,6 +74,8 @@ public:
 	virtual ~DrawEngineCommon();
 
 	void Init();
+	virtual void DeviceLost() = 0;
+	virtual void DeviceRestore(Draw::DrawContext *draw) = 0;
 
 	bool GetCurrentSimpleVertices(int count, std::vector<GPUDebugVertex> &vertices, std::vector<u16> &indices);
 
@@ -69,13 +88,15 @@ public:
 	// This would seem to be unnecessary now, but is still required for splines/beziers to work in the software backend since SubmitPrim
 	// is different. Should probably refactor that.
 	// Note that vertTypeID should be computed using GetVertTypeID().
-	virtual void DispatchSubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertTypeID, int cullMode, int *bytesRead) {
+	virtual void DispatchSubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, u32 vertTypeID, int cullMode, int *bytesRead) {
 		SubmitPrim(verts, inds, prim, vertexCount, vertTypeID, cullMode, bytesRead);
 	}
 
-	bool TestBoundingBox(void* control_points, int vertexCount, u32 vertType, int *bytesRead);
+	virtual void DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex *buffer, int vertexCount, int cullMode, bool continuation);
 
-	void SubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertTypeID, int cullMode, int *bytesRead);
+	bool TestBoundingBox(const void *control_points, const void *inds, int vertexCount, u32 vertType);
+
+	void SubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, u32 vertTypeID, int cullMode, int *bytesRead);
 	template<class Surface>
 	void SubmitCurve(const void *control_points, const void *indices, Surface &surface, u32 vertType, int *bytesRead, const char *scope);
 	void ClearSplineBezierWeights();
@@ -86,10 +107,19 @@ public:
 	std::vector<std::string> DebugGetVertexLoaderIDs();
 	std::string DebugGetVertexLoaderString(std::string id, DebugShaderStringType stringType);
 
-	virtual void Resized();
+	virtual void NotifyConfigChanged();
+
+	bool EverUsedExactEqualDepth() const {
+		return everUsedExactEqualDepth_;
+	}
+	void SetEverUsedExactEqualDepth(bool v) {
+		everUsedExactEqualDepth_ = v;
+	}
 
 	bool IsCodePtrVertexDecoder(const u8 *ptr) const {
-		return decJitCache_->IsInSpace(ptr);
+		if (decJitCache_)
+			return decJitCache_->IsInSpace(ptr);
+		return false;
 	}
 	int GetNumDrawCalls() const {
 		return numDrawCalls;
@@ -97,9 +127,10 @@ public:
 
 	VertexDecoder *GetVertexDecoder(u32 vtype);
 
+	virtual void ClearTrackedVertexArrays() {}
+
 protected:
 	virtual bool UpdateUseHWTessellation(bool enabled) { return enabled; }
-	virtual void ClearTrackedVertexArrays() {}
 
 	int ComputeNumVertsToDecode() const;
 	void DecodeVerts(u8 *dest);
@@ -114,7 +145,7 @@ protected:
 	// Vertex decoding
 	void DecodeVertsStep(u8 *dest, int &i, int &decodedVerts);
 
-	bool ApplyFramebufferRead(bool *fboTexNeedsBind);
+	void ApplyFramebufferRead(FBOTexState *fboTexState);
 
 	inline int IndexSize(u32 vtype) const {
 		const u32 indexType = (vtype & GE_VTYPE_IDX_MASK);
@@ -126,15 +157,39 @@ protected:
 		return 1;
 	}
 
+	inline void UpdateEverUsedEqualDepth(GEComparison comp) {
+		switch (comp) {
+		case GE_COMP_EQUAL:
+			everUsedExactEqualDepth_ = true;
+			everUsedEqualDepth_ = true;
+			break;
+
+		case GE_COMP_NOTEQUAL:
+		case GE_COMP_LEQUAL:
+		case GE_COMP_GEQUAL:
+			everUsedEqualDepth_ = true;
+			break;
+
+		default:
+			break;
+		}
+	}
+
 	bool useHWTransform_ = false;
 	bool useHWTessellation_ = false;
+	// Used to prevent unnecessary flushing in softgpu.
+	bool flushOnParams_ = true;
+
+	// Set once a equal depth test is encountered.
+	bool everUsedEqualDepth_ = false;
+	bool everUsedExactEqualDepth_ = false;
 
 	// Vertex collector buffers
 	u8 *decoded = nullptr;
 	u16 *decIndex = nullptr;
 
 	// Cached vertex decoders
-	u32 lastVType_ = -1;
+	u32 lastVType_ = -1;  // corresponds to dec_.  Could really just pick it out of dec_...
 	DenseHashMap<u32, VertexDecoder *, nullptr> decoderMap_;
 	VertexDecoder *dec_ = nullptr;
 	VertexDecoderJitCache *decJitCache_ = nullptr;
@@ -145,15 +200,15 @@ protected:
 
 	// Defer all vertex decoding to a "Flush" (except when software skinning)
 	struct DeferredDrawCall {
-		void *verts;
-		void *inds;
+		const void *verts;
+		const void *inds;
 		u32 vertexCount;
 		u8 indexType;
 		s8 prim;
+		u8 cullMode;
 		u16 indexLowerBound;
 		u16 indexUpperBound;
 		UVScale uvScale;
-		int cullMode;
 	};
 
 	enum { MAX_DEFERRED_DRAW_CALLS = 128 };
@@ -171,8 +226,12 @@ protected:
 	GEPrimitiveType prevPrim_ = GE_PRIM_INVALID;
 
 	// Shader blending state
-	bool fboTexNeedsBind_ = false;
 	bool fboTexBound_ = false;
+
+	// Sometimes, unusual situations mean we need to reset dirty flags after state calc finishes.
+	uint64_t dirtyRequiresRecheck_ = 0;
+
+	ComputedPipelineState pipelineState_;
 
 	// Hardware tessellation
 	TessellationDataTransfer *tessDataTransfer;

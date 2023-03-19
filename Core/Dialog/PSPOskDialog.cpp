@@ -28,8 +28,8 @@
 #include "Core/Dialog/PSPOskDialog.h"
 #include "Core/Util/PPGeDraw.h"
 #include "Core/HLE/sceCtrl.h"
-#include "Core/HLE/sceDisplay.h"
 #include "Core/HLE/sceUtility.h"
+#include "Core/HW/Display.h"
 #include "Core/Config.h"
 #include "Core/Reporting.h"
 #include "GPU/GPUState.h"
@@ -148,6 +148,17 @@ static const char16_t oskKeys[OSK_KEYBOARD_COUNT][6][14] =
 
 // This isn't a complete representation of these flags, it just helps ensure we show the right keyboards.
 int allowedInputFlagsMap[OSK_KEYBOARD_COUNT] = {
+	PSP_UTILITY_OSK_INPUTTYPE_LATIN_LOWERCASE | PSP_UTILITY_OSK_INPUTTYPE_LATIN_UPPERCASE | PSP_UTILITY_OSK_INPUTTYPE_LATIN_SYMBOL | PSP_UTILITY_OSK_INPUTTYPE_LATIN_DIGIT,
+	PSP_UTILITY_OSK_INPUTTYPE_LATIN_LOWERCASE | PSP_UTILITY_OSK_INPUTTYPE_LATIN_UPPERCASE | PSP_UTILITY_OSK_INPUTTYPE_LATIN_SYMBOL,
+	PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_HIRAGANA,
+	PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_KATAKANA | PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_HALF_KATAKANA,
+	PSP_UTILITY_OSK_INPUTTYPE_KOREAN,
+	PSP_UTILITY_OSK_INPUTTYPE_RUSSIAN_LOWERCASE | PSP_UTILITY_OSK_INPUTTYPE_RUSSIAN_UPPERCASE,
+	PSP_UTILITY_OSK_INPUTTYPE_RUSSIAN_LOWERCASE | PSP_UTILITY_OSK_INPUTTYPE_RUSSIAN_UPPERCASE,
+	PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_LOWERCASE | PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_UPPERCASE | PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_SYMBOL | PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_DIGIT,
+	PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_LOWERCASE | PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_UPPERCASE | PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_SYMBOL,
+};
+int defaultInputFlagsMap[OSK_KEYBOARD_COUNT] = {
 	PSP_UTILITY_OSK_INPUTTYPE_LATIN_LOWERCASE | PSP_UTILITY_OSK_INPUTTYPE_LATIN_SYMBOL | PSP_UTILITY_OSK_INPUTTYPE_LATIN_DIGIT,
 	PSP_UTILITY_OSK_INPUTTYPE_LATIN_UPPERCASE | PSP_UTILITY_OSK_INPUTTYPE_LATIN_SYMBOL,
 	PSP_UTILITY_OSK_INPUTTYPE_JAPANESE_HIRAGANA,
@@ -249,11 +260,17 @@ static void FindValidKeyboard(s32 inputType, int direction, OskKeyboardLanguage 
 	if (inputType == 0) {
 		return;
 	}
+	// We use direction = 0 for default, but we actually move "forward".
+	int *matchMap = allowedInputFlagsMap;
+	if (direction == 0) {
+		direction = 1;
+		matchMap = defaultInputFlagsMap;
+	}
 
 	// TODO: Limit by allowed keyboards properly... this is just an approximation.
 	int tries = OSK_LANGUAGE_COUNT * 2;
-	while (!(inputType & allowedInputFlagsMap[disp]) && tries > 0) {
-		if ((--tries % 1) == 0) {
+	while (!(inputType & matchMap[disp]) && tries > 0) {
+		if ((--tries % 2) == 0) {
 			lang = (OskKeyboardLanguage)((OSK_LANGUAGE_COUNT + lang + direction) % OSK_LANGUAGE_COUNT);
 			disp = OskKeyboardCases[lang][LOWERCASE];
 		} else {
@@ -312,7 +329,7 @@ int PSPOskDialog::Init(u32 oskPtr) {
 	selectedChar = 0;
 	currentKeyboardLanguage = OSK_LANGUAGE_ENGLISH;
 	currentKeyboard = OSK_KEYBOARD_LATIN_LOWERCASE;
-	FindValidKeyboard(oskParams->fields[0].inputtype, 1, currentKeyboardLanguage, currentKeyboard);
+	FindValidKeyboard(oskParams->fields[0].inputtype, 0, currentKeyboardLanguage, currentKeyboard);
 
 	ConvertUCS2ToUTF8(oskDesc, oskParams->fields[0].desc);
 	ConvertUCS2ToUTF8(oskIntext, oskParams->fields[0].intext);
@@ -329,10 +346,11 @@ int PSPOskDialog::Init(u32 oskPtr) {
 			inputChars += c;
 	}
 
-	languageMapping = GetLangValuesMapping();
+	languageMapping = g_Config.GetLangValuesMapping();
 
 	// Eat any keys pressed before the dialog inited.
 	UpdateButtons();
+	InitCommon();
 
 	std::lock_guard<std::mutex> guard(nativeMutex_);
 	nativeStatus_ = PSPOskNativeStatus::IDLE;
@@ -924,8 +942,9 @@ int PSPOskDialog::Update(int animSpeed) {
 		return SCE_ERROR_UTILITY_INVALID_STATUS;
 	}
 
-	int cancelButton = g_Config.iButtonPreference == PSP_SYSTEMPARAM_BUTTON_CROSS ? CTRL_CIRCLE : CTRL_CROSS;
-	int confirmButton = cancelButton == CTRL_CROSS ? CTRL_CIRCLE : CTRL_CROSS;
+	int cancelButton = GetCancelButton();
+	int confirmButton = GetConfirmButton();
+
 	static int cancelBtnFramesHeld = 0;
 	static int confirmBtnFramesHeld = 0;
 	static int leftBtnFramesHeld = 0;
@@ -936,6 +955,7 @@ int PSPOskDialog::Update(int animSpeed) {
 	const int framesHeldRepeatRate = 5;
 
 	UpdateButtons();
+	UpdateCommon();
 	int selectedRow = selectedChar / numKeyCols[currentKeyboard];
 	int selectedExtra = selectedChar % numKeyCols[currentKeyboard];
 
@@ -943,7 +963,7 @@ int PSPOskDialog::Update(int animSpeed) {
 	// Windows: Fall back to the OSK/continue normally if we're in fullscreen.
 	// The dialog box doesn't work right if in fullscreen.
 	if (System_GetPropertyBool(SYSPROP_HAS_KEYBOARD)) {
-		if (g_Config.bBypassOSKWithKeyboard && !g_Config.bFullScreen)
+		if (g_Config.bBypassOSKWithKeyboard && !g_Config.UseFullScreen())
 			return NativeKeyboard();
 	}
 #endif
@@ -962,7 +982,7 @@ int PSPOskDialog::Update(int animSpeed) {
 	PPGeDrawImage(ImageID("I_SQUARE"), 365, 222, 16, 16, guideStyle);
 	PPGeDrawText(di->T("Space"), 390, 222, actionStyle);
 
-	if (g_Config.iButtonPreference != PSP_SYSTEMPARAM_BUTTON_CIRCLE) {
+	if (GetConfirmButton() != CTRL_CIRCLE) {
 		PPGeDrawImage(ImageID("I_CROSS"), 45, 222, 16, 16, guideStyle);
 		PPGeDrawImage(ImageID("I_CIRCLE"), 45, 247, 16, 16, guideStyle);
 	} else {

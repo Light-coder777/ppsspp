@@ -140,6 +140,7 @@ int PSPMsgDialog::Init(unsigned int paramAddr) {
 	ChangeStatusInit(MSG_INIT_DELAY_US);
 
 	UpdateButtons();
+	InitCommon();
 	StartFade(true);
 	return 0;
 }
@@ -186,7 +187,7 @@ void PSPMsgDialog::DisplayMessage(std::string text, bool hasYesNo, bool hasOK) {
 
 	// Without the scrollbar, we have 390 total pixels.
 	float WRAP_WIDTH = 340.0f;
-	if (UTF8StringNonASCIICount(text.c_str()) >= text.size() / 4) {
+	if ((size_t)UTF8StringNonASCIICount(text.c_str()) >= text.size() / 4) {
 		WRAP_WIDTH = 376.0f;
 		if (text.size() > 12) {
 			messageStyle.scale = 0.6f;
@@ -282,19 +283,8 @@ int PSPMsgDialog::Update(int animSpeed) {
 		ChangeStatus(SCE_UTILITY_STATUS_FINISHED, 0);
 	} else {
 		UpdateButtons();
+		UpdateCommon();
 		UpdateFade(animSpeed);
-
-		okButtonImg = ImageID("I_CIRCLE");
-		cancelButtonImg = ImageID("I_CROSS");
-		okButtonFlag = CTRL_CIRCLE;
-		cancelButtonFlag = CTRL_CROSS;
-		if (messageDialog.common.buttonSwap == 1)
-		{
-			okButtonImg = ImageID("I_CROSS");
-			cancelButtonImg = ImageID("I_CIRCLE");
-			okButtonFlag = CTRL_CROSS;
-			cancelButtonFlag = CTRL_CIRCLE;
-		}
 
 		StartDraw();
 		// white -> RGB(168,173,189), black -> RGB(129,134,150)

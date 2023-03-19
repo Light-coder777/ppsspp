@@ -87,7 +87,7 @@ enum CPUThreadState {
 MetaFileSystem pspFileSystem;
 ParamSFOData g_paramSFO;
 static GlobalUIState globalUIState;
-static CoreParameter coreParameter;
+CoreParameter g_CoreParameter;
 static FileLoader *loadedFile;
 // For background loading thread.
 static std::mutex loadingLock;
@@ -114,6 +114,7 @@ static std::string gpuBackendDevice;
 static volatile bool pspIsInited = false;
 static volatile bool pspIsIniting = false;
 static volatile bool pspIsQuitting = false;
+static volatile bool pspIsRebooting = false;
 
 void ResetUIState() {
 	globalUIState = UISTATE_MENU;
@@ -231,7 +232,7 @@ bool CPU_Init(std::string *errorString) {
 	g_DoubleTextureCoordinates = false;
 	Memory::g_PSPModel = g_Config.iPSPModel;
 
-	Path filename = coreParameter.fileToStart;
+	Path filename = g_CoreParameter.fileToStart;
 	loadedFile = ResolveFileLoaderTarget(ConstructFileLoader(filename));
 #if PPSSPP_ARCH(AMD64)
 	if (g_Config.bCacheFullIsoInRam) {
@@ -242,8 +243,8 @@ bool CPU_Init(std::string *errorString) {
 	IdentifiedFileType type = Identify_File(loadedFile, errorString);
 
 	// TODO: Put this somewhere better?
-	if (!coreParameter.mountIso.empty()) {
-		coreParameter.mountIsoLoader = ConstructFileLoader(coreParameter.mountIso);
+	if (!g_CoreParameter.mountIso.empty()) {
+		g_CoreParameter.mountIsoLoader = ConstructFileLoader(g_CoreParameter.mountIso);
 	}
 
 	MIPSAnalyst::Reset();
@@ -287,7 +288,7 @@ bool CPU_Init(std::string *errorString) {
 	// Here we have read the PARAM.SFO, let's see if we need any compatibility overrides.
 	// Homebrew usually has an empty discID, and even if they do have a disc id, it's not
 	// likely to collide with any commercial ones.
-	coreParameter.compat.Load(g_paramSFO.GetDiscID());
+	g_CoreParameter.compat.Load(g_paramSFO.GetDiscID());
 
 	InitVFPUSinCos();
 
@@ -295,13 +296,14 @@ bool CPU_Init(std::string *errorString) {
 		HLEPlugins::Init();
 	if (!Memory::Init()) {
 		// We're screwed.
+		*errorString = "Memory init failed";
 		return false;
 	}
 	mipsr4k.Reset();
 
 	host->AttemptLoadSymbolMap();
 
-	if (coreParameter.enableSound) {
+	if (g_CoreParameter.enableSound) {
 		Audio_Init();
 	}
 
@@ -314,13 +316,13 @@ bool CPU_Init(std::string *errorString) {
 
 	// If they shut down early, we'll catch it when load completes.
 	// Note: this may return before init is complete, which is checked if CPU_IsReady().
-	if (!LoadFile(&loadedFile, &coreParameter.errorString)) {
+	if (!LoadFile(&loadedFile, &g_CoreParameter.errorString)) {
 		CPU_Shutdown();
-		coreParameter.fileToStart.clear();
+		g_CoreParameter.fileToStart.clear();
 		return false;
 	}
 
-	if (coreParameter.updateRecent) {
+	if (g_CoreParameter.updateRecent) {
 		g_Config.AddRecent(filename.ToString());
 	}
 
@@ -352,7 +354,7 @@ void CPU_Shutdown() {
 	CoreTiming::Shutdown();
 	__KernelShutdown();
 	HLEShutdown();
-	if (coreParameter.enableSound) {
+	if (g_CoreParameter.enableSound) {
 		Audio_Shutdown();
 	}
 
@@ -364,11 +366,11 @@ void CPU_Shutdown() {
 	delete loadedFile;
 	loadedFile = nullptr;
 
-	delete coreParameter.mountIsoLoader;
+	delete g_CoreParameter.mountIsoLoader;
 	delete g_symbolMap;
 	g_symbolMap = nullptr;
 
-	coreParameter.mountIsoLoader = nullptr;
+	g_CoreParameter.mountIsoLoader = nullptr;
 }
 
 // TODO: Maybe loadedFile doesn't even belong here...
@@ -391,8 +393,10 @@ void Core_UpdateDebugStats(bool collectStats) {
 		mipsr4k.ClearJitCache();
 	}
 
-	kernelStats.ResetFrame();
-	gpuStats.ResetFrame();
+	if (!PSP_CoreParameter().frozen && !Core_IsStepping()) {
+		kernelStats.ResetFrame();
+		gpuStats.ResetFrame();
+	}
 }
 
 void Core_ForceDebugStats(bool enable) {
@@ -410,25 +414,25 @@ bool PSP_InitStart(const CoreParameter &coreParam, std::string *error_string) {
 	}
 
 #if defined(_WIN32) && PPSSPP_ARCH(AMD64)
-	INFO_LOG(BOOT, "PPSSPP %s Windows 64 bit", PPSSPP_GIT_VERSION);
+	NOTICE_LOG(BOOT, "PPSSPP %s Windows 64 bit", PPSSPP_GIT_VERSION);
 #elif defined(_WIN32) && !PPSSPP_ARCH(AMD64)
-	INFO_LOG(BOOT, "PPSSPP %s Windows 32 bit", PPSSPP_GIT_VERSION);
+	NOTICE_LOG(BOOT, "PPSSPP %s Windows 32 bit", PPSSPP_GIT_VERSION);
 #else
-	INFO_LOG(BOOT, "PPSSPP %s", PPSSPP_GIT_VERSION);
+	NOTICE_LOG(BOOT, "PPSSPP %s", PPSSPP_GIT_VERSION);
 #endif
 
 	Core_NotifyLifecycle(CoreLifecycle::STARTING);
-	GraphicsContext *temp = coreParameter.graphicsContext;
-	coreParameter = coreParam;
-	if (coreParameter.graphicsContext == nullptr) {
-		coreParameter.graphicsContext = temp;
+	GraphicsContext *temp = g_CoreParameter.graphicsContext;
+	g_CoreParameter = coreParam;
+	if (g_CoreParameter.graphicsContext == nullptr) {
+		g_CoreParameter.graphicsContext = temp;
 	}
-	coreParameter.errorString = "";
+	g_CoreParameter.errorString.clear();
 	pspIsIniting = true;
 	PSP_SetLoading("Loading game...");
 
-	if (!CPU_Init(&coreParameter.errorString)) {
-		*error_string = coreParameter.errorString;
+	if (!CPU_Init(&g_CoreParameter.errorString)) {
+		*error_string = g_CoreParameter.errorString;
 		if (error_string->empty()) {
 			*error_string = "Failed initializing CPU/Memory";
 		}
@@ -438,14 +442,17 @@ bool PSP_InitStart(const CoreParameter &coreParam, std::string *error_string) {
 
 	// Compat flags get loaded in CPU_Init (which is a bit of a misnomer) so we check for SW renderer here.
 	if (g_Config.bSoftwareRendering || PSP_CoreParameter().compat.flags().ForceSoftwareRenderer) {
-		coreParameter.gpuCore = GPUCORE_SOFTWARE;
+		g_CoreParameter.gpuCore = GPUCORE_SOFTWARE;
 	}
 
-	*error_string = coreParameter.errorString;
-	bool success = !coreParameter.fileToStart.empty();
+	*error_string = g_CoreParameter.errorString;
+	bool success = !g_CoreParameter.fileToStart.empty();
 	if (!success) {
 		Core_NotifyLifecycle(CoreLifecycle::START_COMPLETE);
-		pspIsIniting = false;
+		pspIsRebooting = false;
+		// In this case, we must call shutdown since the caller won't know to.
+		// It must've partially started since CPU_Init returned true.
+		PSP_Shutdown();
 	}
 	return success;
 }
@@ -459,17 +466,18 @@ bool PSP_InitUpdate(std::string *error_string) {
 		return false;
 	}
 
-	bool success = !coreParameter.fileToStart.empty();
-	*error_string = coreParameter.errorString;
+	bool success = !g_CoreParameter.fileToStart.empty();
+	*error_string = g_CoreParameter.errorString;
 	if (success && gpu == nullptr) {
 		PSP_SetLoading("Starting graphics...");
-		Draw::DrawContext *draw = coreParameter.graphicsContext ? coreParameter.graphicsContext->GetDrawContext() : nullptr;
-		success = GPU_Init(coreParameter.graphicsContext, draw);
+		Draw::DrawContext *draw = g_CoreParameter.graphicsContext ? g_CoreParameter.graphicsContext->GetDrawContext() : nullptr;
+		success = GPU_Init(g_CoreParameter.graphicsContext, draw);
 		if (!success) {
 			*error_string = "Unable to initialize rendering engine.";
 		}
 	}
 	if (!success) {
+		pspIsRebooting = false;
 		PSP_Shutdown();
 		return true;
 	}
@@ -478,6 +486,15 @@ bool PSP_InitUpdate(std::string *error_string) {
 	pspIsIniting = !pspIsInited;
 	if (pspIsInited) {
 		Core_NotifyLifecycle(CoreLifecycle::START_COMPLETE);
+		pspIsRebooting = false;
+
+		// If GPU init failed during IsReady checks, bail.
+		if (!GPU_IsStarted()) {
+			*error_string = "Unable to initialize rendering engine.";
+			pspIsRebooting = false;
+			PSP_Shutdown();
+			return true;
+		}
 	}
 	return pspIsInited;
 }
@@ -496,7 +513,11 @@ bool PSP_IsIniting() {
 }
 
 bool PSP_IsInited() {
-	return pspIsInited && !pspIsQuitting;
+	return pspIsInited && !pspIsQuitting && !pspIsRebooting;
+}
+
+bool PSP_IsRebooting() {
+	return pspIsRebooting;
 }
 
 bool PSP_IsQuitting() {
@@ -510,7 +531,7 @@ void PSP_Shutdown() {
 	}
 
 	// Make sure things know right away that PSP memory, etc. is going away.
-	pspIsQuitting = true;
+	pspIsQuitting = !pspIsRebooting;
 	if (coreState == CORE_RUNNING)
 		Core_Stop();
 
@@ -533,6 +554,18 @@ void PSP_Shutdown() {
 	pspIsQuitting = false;
 	g_Config.unloadGameConfig();
 	Core_NotifyLifecycle(CoreLifecycle::STOPPED);
+}
+
+bool PSP_Reboot(std::string *error_string) {
+	if (!pspIsInited || pspIsQuitting)
+		return false;
+
+	pspIsRebooting = true;
+	Core_Stop();
+	Core_WaitInactive();
+	PSP_Shutdown();
+	std::string resetError;
+	return PSP_Init(PSP_CoreParameter(), error_string);
 }
 
 void PSP_BeginHostFrame() {
@@ -574,7 +607,6 @@ void PSP_RunLoopUntil(u64 globalticks) {
 	}
 
 	mipsr4k.RunLoopUntil(globalticks);
-	gpu->CleanupBeforeUI();
 }
 
 void PSP_RunLoopFor(int cycles) {
@@ -591,14 +623,10 @@ std::string PSP_GetLoading() {
 	return loadingReason;
 }
 
-CoreParameter &PSP_CoreParameter() {
-	return coreParameter;
-}
-
 Path GetSysDirectory(PSPDirectories directoryType) {
-	Path memStickDirectory = g_Config.memStickDirectory;
+	const Path &memStickDirectory = g_Config.memStickDirectory;
 	Path pspDirectory;
-	if (memStickDirectory.GetFilename() == "PSP") {
+	if (!strcasecmp(memStickDirectory.GetFilename().c_str(), "PSP")) {
 		// Let's strip this off, to easily allow choosing a root directory named "PSP" on Android.
 		pspDirectory = memStickDirectory;
 	} else {
@@ -643,6 +671,8 @@ Path GetSysDirectory(PSPDirectories directoryType) {
 		return pspDirectory / "AUDIO";
 	case DIRECTORY_CUSTOM_SHADERS:
 		return pspDirectory / "shaders";
+	case DIRECTORY_CUSTOM_THEMES:
+		return pspDirectory / "themes";
 
 	case DIRECTORY_MEMSTICK_ROOT:
 		return g_Config.memStickDirectory;
@@ -727,6 +757,7 @@ void InitSysDirectories() {
 	File::CreateDir(GetSysDirectory(DIRECTORY_GAME));
 	File::CreateDir(GetSysDirectory(DIRECTORY_SAVEDATA));
 	File::CreateDir(GetSysDirectory(DIRECTORY_SAVESTATE));
+	File::CreateDir(GetSysDirectory(DIRECTORY_SYSTEM));
 
 	if (g_Config.currentDirectory.empty()) {
 		g_Config.currentDirectory = GetSysDirectory(DIRECTORY_GAME);

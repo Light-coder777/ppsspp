@@ -56,6 +56,7 @@ enum PSPDirectories {
 	DIRECTORY_MEMSTICK_ROOT,
 	DIRECTORY_EXDATA,
 	DIRECTORY_CUSTOM_SHADERS,
+	DIRECTORY_CUSTOM_THEMES,
 };
 
 class GraphicsContext;
@@ -74,8 +75,10 @@ bool PSP_InitStart(const CoreParameter &coreParam, std::string *error_string);
 bool PSP_InitUpdate(std::string *error_string);
 bool PSP_IsIniting();
 bool PSP_IsInited();
+bool PSP_IsRebooting();
 bool PSP_IsQuitting();
 void PSP_Shutdown();
+bool PSP_Reboot(std::string *error_string);
 
 void PSP_BeginHostFrame();
 void PSP_EndHostFrame();
@@ -135,4 +138,7 @@ extern volatile CoreState coreState;
 extern volatile bool coreStatePending;
 void Core_UpdateState(CoreState newState);
 
-CoreParameter &PSP_CoreParameter();
+inline CoreParameter &PSP_CoreParameter() {
+	extern CoreParameter g_CoreParameter;
+	return g_CoreParameter;
+}

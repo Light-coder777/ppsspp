@@ -79,6 +79,25 @@ u32 RunMemCheck(u32 pc, u32 addr) {
 	return coreState != CORE_RUNNING ? 1 : 0;
 }
 
+template <uint32_t alignment>
+u32 RunValidateAddress(u32 pc, u32 addr, u32 isWrite) {
+	const auto toss = [&](MemoryExceptionType t) {
+		Core_MemoryException(addr, alignment, pc, t);
+		return coreState != CORE_RUNNING ? 1 : 0;
+	};
+
+	if (!Memory::IsValidRange(addr, alignment)) {
+		MemoryExceptionType t = isWrite == 1 ? MemoryExceptionType::WRITE_WORD : MemoryExceptionType::READ_WORD;
+		if (alignment > 4)
+			t = isWrite ? MemoryExceptionType::WRITE_BLOCK : MemoryExceptionType::READ_BLOCK;
+		return toss(t);
+	}
+	if (alignment > 1 && (addr & (alignment - 1)) != 0) {
+		return toss(MemoryExceptionType::ALIGNMENT);
+	}
+	return 0;
+}
+
 // We cannot use NEON on ARM32 here until we make it a hard dependency. We can, however, on ARM64.
 u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 	const IRInst *end = inst + count;
@@ -140,6 +159,31 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 			break;
 		case IROp::ReverseBits:
 			mips->r[inst->dest] = ReverseBits32(mips->r[inst->src1]);
+			break;
+
+		case IROp::ValidateAddress8:
+			if (RunValidateAddress<1>(mips->pc, mips->r[inst->src1] + inst->constant, inst->src2)) {
+				CoreTiming::ForceCheck();
+				return mips->pc;
+			}
+		break;
+		case IROp::ValidateAddress16:
+			if (RunValidateAddress<2>(mips->pc, mips->r[inst->src1] + inst->constant, inst->src2)) {
+				CoreTiming::ForceCheck();
+				return mips->pc;
+			}
+			break;
+		case IROp::ValidateAddress32:
+			if (RunValidateAddress<4>(mips->pc, mips->r[inst->src1] + inst->constant, inst->src2)) {
+				CoreTiming::ForceCheck();
+				return mips->pc;
+			}
+			break;
+		case IROp::ValidateAddress128:
+			if (RunValidateAddress<16>(mips->pc, mips->r[inst->src1] + inst->constant, inst->src2)) {
+				CoreTiming::ForceCheck();
+				return mips->pc;
+			}
 			break;
 
 		case IROp::Load8:
@@ -258,7 +302,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 		{
 #if defined(_M_SSE)
 			_mm_store_ps(&mips->f[inst->dest], _mm_load_ps(&mips->f[inst->src1]));
-#elif PPSSPP_ARCH(ARM64)
+#elif PPSSPP_ARCH(ARM64_NEON)
 			vst1q_f32(&mips->f[inst->dest], vld1q_f32(&mips->f[inst->src1]));
 #else
 			memcpy(&mips->f[inst->dest], &mips->f[inst->src1], 4 * sizeof(float));
@@ -270,7 +314,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 		{
 #if defined(_M_SSE)
 			_mm_store_ps(&mips->f[inst->dest], _mm_add_ps(_mm_load_ps(&mips->f[inst->src1]), _mm_load_ps(&mips->f[inst->src2])));
-#elif PPSSPP_ARCH(ARM64)
+#elif PPSSPP_ARCH(ARM64_NEON)
 			vst1q_f32(&mips->f[inst->dest], vaddq_f32(vld1q_f32(&mips->f[inst->src1]), vld1q_f32(&mips->f[inst->src2])));
 #else
 			for (int i = 0; i < 4; i++)
@@ -283,7 +327,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 		{
 #if defined(_M_SSE)
 			_mm_store_ps(&mips->f[inst->dest], _mm_sub_ps(_mm_load_ps(&mips->f[inst->src1]), _mm_load_ps(&mips->f[inst->src2])));
-#elif PPSSPP_ARCH(ARM64)
+#elif PPSSPP_ARCH(ARM64_NEON)
 			vst1q_f32(&mips->f[inst->dest], vsubq_f32(vld1q_f32(&mips->f[inst->src1]), vld1q_f32(&mips->f[inst->src2])));
 #else
 			for (int i = 0; i < 4; i++)
@@ -296,7 +340,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 		{
 #if defined(_M_SSE)
 			_mm_store_ps(&mips->f[inst->dest], _mm_mul_ps(_mm_load_ps(&mips->f[inst->src1]), _mm_load_ps(&mips->f[inst->src2])));
-#elif PPSSPP_ARCH(ARM64)
+#elif PPSSPP_ARCH(ARM64_NEON)
 			vst1q_f32(&mips->f[inst->dest], vmulq_f32(vld1q_f32(&mips->f[inst->src1]), vld1q_f32(&mips->f[inst->src2])));
 #else
 			for (int i = 0; i < 4; i++)
@@ -331,7 +375,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 		{
 #if defined(_M_SSE)
 			_mm_store_ps(&mips->f[inst->dest], _mm_xor_ps(_mm_load_ps(&mips->f[inst->src1]), _mm_load_ps((const float *)signBits)));
-#elif PPSSPP_ARCH(ARM64)
+#elif PPSSPP_ARCH(ARM64_NEON)
 			vst1q_f32(&mips->f[inst->dest], vnegq_f32(vld1q_f32(&mips->f[inst->src1])));
 #else
 			for (int i = 0; i < 4; i++)
@@ -344,7 +388,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 		{
 #if defined(_M_SSE)
 			_mm_store_ps(&mips->f[inst->dest], _mm_and_ps(_mm_load_ps(&mips->f[inst->src1]), _mm_load_ps((const float *)noSignMask)));
-#elif PPSSPP_ARCH(ARM64)
+#elif PPSSPP_ARCH(ARM64_NEON)
 			vst1q_f32(&mips->f[inst->dest], vabsq_f32(vld1q_f32(&mips->f[inst->src1])));
 #else
 			for (int i = 0; i < 4; i++)
@@ -837,16 +881,22 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 				break;
 			}
 			case IRFpCompareMode::EqualOrdered:
-			case IRFpCompareMode::EqualUnordered:
 				mips->fpcond = mips->f[inst->src1] == mips->f[inst->src2];
 				break;
+			case IRFpCompareMode::EqualUnordered:
+				mips->fpcond = mips->f[inst->src1] == mips->f[inst->src2] || my_isnan(mips->f[inst->src1]) || my_isnan(mips->f[inst->src2]);
+				break;
 			case IRFpCompareMode::LessEqualOrdered:
-			case IRFpCompareMode::LessEqualUnordered:
 				mips->fpcond = mips->f[inst->src1] <= mips->f[inst->src2];
 				break;
+			case IRFpCompareMode::LessEqualUnordered:
+				mips->fpcond = !(mips->f[inst->src1] > mips->f[inst->src2]);
+				break;
 			case IRFpCompareMode::LessOrdered:
-			case IRFpCompareMode::LessUnordered:
 				mips->fpcond = mips->f[inst->src1] < mips->f[inst->src2];
+				break;
+			case IRFpCompareMode::LessUnordered:
+				mips->fpcond = !(mips->f[inst->src1] >= mips->f[inst->src2]);
 				break;
 			}
 			break;
@@ -954,7 +1004,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, int count) {
 		}
 
 		case IROp::Break:
-			Core_Break();
+			Core_Break(mips->pc);
 			return mips->pc + 4;
 
 		case IROp::SetCtrlVFPU:

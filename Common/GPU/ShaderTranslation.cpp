@@ -41,6 +41,7 @@
 #include "Common/GPU/ShaderTranslation.h"
 #include "ext/glslang/SPIRV/GlslangToSpv.h"
 #include "Common/GPU/thin3d.h"
+#include "Common/GPU/Shader.h"
 #include "Common/GPU/OpenGL/GLFeatures.h"
 
 #include "ext/SPIRV-Cross/spirv.hpp"
@@ -50,8 +51,6 @@
 #ifdef _WIN32
 #include "ext/SPIRV-Cross/spirv_hlsl.hpp"
 #endif
-
-extern void init_resources(TBuiltInResource &Resources);
 
 static EShLanguage GetShLanguageFromStage(const ShaderStage stage) {
 	switch (stage) {
@@ -152,16 +151,18 @@ std::string Postprocess(std::string code, ShaderLanguage lang, ShaderStage stage
 	return output;
 }
 
+static_assert(Draw::SEM_TEXCOORD0 == 3, "Semantic shader hardcoded in glsl below.");
+
 bool ConvertToVulkanGLSL(std::string *dest, TranslatedShaderMetadata *destMetadata, std::string src, ShaderStage stage, std::string *errorMessage) {
 	std::stringstream out;
 
-	static struct {
+	static const struct {
 		ShaderStage stage;
 		const char *needle;
 		const char *replacement;
 	} replacements[] = {
 		{ ShaderStage::Vertex, "attribute vec4 a_position;", "layout(location = 0) in vec4 a_position;" },
-		{ ShaderStage::Vertex, "attribute vec2 a_texcoord0;", "layout(location = 2) in vec2 a_texcoord0;"},
+		{ ShaderStage::Vertex, "attribute vec2 a_texcoord0;", "layout(location = 3) in vec2 a_texcoord0;"},
 		{ ShaderStage::Vertex, "varying vec2 v_position;", "layout(location = 0) out vec2 v_position;" },
 		{ ShaderStage::Fragment, "varying vec2 v_position;", "layout(location = 0) in vec2 v_position;" },
 		{ ShaderStage::Fragment, "texture2D(", "texture(" },
@@ -233,13 +234,13 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, const ShaderLan
 	return false;
 #endif
 
-	*errorMessage = "";
+	errorMessage->clear();
 
 	glslang::TProgram program;
 	const char *shaderStrings[1]{};
 
 	TBuiltInResource Resources{};
-	init_resources(Resources);
+	InitShaderResources(Resources);
 
 	// Don't enable SPIR-V and Vulkan rules when parsing GLSL. Our postshaders are written in oldschool GLES 2.0.
 	EShMessages messages = EShMessages::EShMsgDefault;

@@ -24,6 +24,7 @@
 #include "Common/Serialize/Serializer.h"
 #include "Common/StringUtils.h"
 
+#include "Core/Config.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/HLE/sceKernelMemory.h"
@@ -48,7 +49,7 @@ IRJit::IRJit(MIPSState *mipsState) : frontend_(mipsState->HasDefaultPrefix()), m
 
 	IROptions opts{};
 	opts.disableFlags = g_Config.uJitDisableFlags;
-	opts.unalignedLoadStore = opts.disableFlags & (uint32_t)JitDisable::LSU_UNALIGNED;
+	opts.unalignedLoadStore = (opts.disableFlags & (uint32_t)JitDisable::LSU_UNALIGNED) == 0;
 	frontend_.SetOptions(opts);
 }
 
@@ -226,9 +227,10 @@ void IRJit::RunLoopUntil(u64 globalticks) {
 			if (opcode == MIPS_EMUHACK_OPCODE) {
 				u32 data = inst & 0xFFFFFF;
 				IRBlock *block = blocks_.GetBlock(data);
+				u32 startPC = mips_->pc;
 				mips_->pc = IRInterpret(mips_, block->GetInstructions(), block->GetNumInstructions());
-				if (!Memory::IsValidAddress(mips_->pc)) {
-					Core_ExecException(mips_->pc, mips_->pc, ExecExceptionType::JUMP);
+				if (!Memory::IsValidAddress(mips_->pc) || (mips_->pc & 3) != 0) {
+					Core_ExecException(mips_->pc, startPC, ExecExceptionType::JUMP);
 					break;
 				}
 			} else {

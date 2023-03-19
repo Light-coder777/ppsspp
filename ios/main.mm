@@ -4,6 +4,7 @@
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <pthread.h>
+#import <signal.h>
 #import <string>
 #import <stdio.h>
 #import <stdlib.h>
@@ -19,6 +20,7 @@
 #include "Common/System/System.h"
 #include "Common/StringUtils.h"
 #include "Common/Profiler/Profiler.h"
+#include "UI/DarwinFileSystemServices.h"
 
 static int (*csops)(pid_t pid, unsigned int ops, void * useraddr, size_t usersize);
 static boolean_t (*exc_server)(mach_msg_header_t *, mach_msg_header_t *);
@@ -91,16 +93,20 @@ static float g_safeInsetRight = 0.0;
 static float g_safeInsetTop = 0.0;
 static float g_safeInsetBottom = 0.0;
 
+// We no longer need to judge if jit is usable or not by according to the ios version.
+/*
 static bool g_jitAvailable = false;
-static int g_iosVersionMajor;
 static int g_iosVersionMinor;
+*/
+static int g_iosVersionMajor;
+static std::string version;
 
 std::string System_GetProperty(SystemProperty prop) {
 	switch (prop) {
 		case SYSPROP_NAME:
-			return StringFromFormat("iOS %d.%d", g_iosVersionMajor, g_iosVersionMinor);
+			return StringFromFormat("iOS %s", version.c_str());
 		case SYSPROP_LANGREGION:
-			return "en_US";
+			return [[[NSLocale currentLocale] objectForKey:NSLocaleIdentifier] UTF8String];
 		default:
 			return "";
 	}
@@ -155,7 +161,7 @@ bool System_GetPropertyBool(SystemProperty prop) {
 			return false;
 #endif
 		case SYSPROP_CAN_JIT:
-			return g_jitAvailable;
+			return get_debugged();
 
 		default:
 			return false;
@@ -196,10 +202,19 @@ void System_SendMessage(const char *command, const char *parameter) {
 			g_safeInsetTop = top;
 			g_safeInsetBottom = bottom;
 		}
+	} else if (!strcmp(command, "browse_folder")) {
+		DarwinDirectoryPanelCallback callback = [] (Path thePathChosen) {
+				NativeMessageReceived("browse_folder", thePathChosen.c_str());
+		};
+		
+		DarwinFileSystemServices services;
+		services.presentDirectoryPanel(callback, /* allowFiles = */ true, /* allowDirectorites = */ true);
 	}
 }
 
+void System_Toast(const char *text) {}
 void System_AskForPermission(SystemPermission permission) {}
+
 PermissionStatus System_GetPermissionStatus(SystemPermission permission) { return PERMISSION_STATUS_GRANTED; }
 
 FOUNDATION_EXTERN void AudioServicesPlaySystemSoundWithVibration(unsigned long, objc_object*, NSDictionary*);
@@ -252,15 +267,15 @@ int main(int argc, char *argv[])
 
 	// So, we'll just resort to a version check.
 
-	std::string version = [[UIDevice currentDevice].systemVersion UTF8String];
-	if (2 != sscanf(version.c_str(), "%d.%d", &g_iosVersionMajor, &g_iosVersionMinor)) {
+	version = [[[UIDevice currentDevice] systemVersion] UTF8String];
+	if (2 != sscanf(version.c_str(), "%d", &g_iosVersionMajor)) {
 		// Just set it to 14.0 if the parsing fails for whatever reason.
 		g_iosVersionMajor = 14;
-		g_iosVersionMinor = 0;
 	}
 
-	g_jitAvailable = get_debugged();
 /*
+	g_jitAvailable = get_debugged();
+
 	if (g_iosVersionMajor > 14 || (g_iosVersionMajor == 14 && g_iosVersionMinor >= 4)) {
 		g_jitAvailable = false;
 	} else {
@@ -269,6 +284,11 @@ int main(int argc, char *argv[])
 */
 
 	PROFILE_INIT();
+
+	// Ignore sigpipe.
+	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+		perror("Unable to ignore SIGPIPE");
+	}
 
 	@autoreleasepool {
 		return UIApplicationMain(argc, argv, NSStringFromClass([PPSSPPUIApplication class]), NSStringFromClass([AppDelegate class]));

@@ -8,7 +8,6 @@
 #import "AppDelegate.h"
 #import "ViewController.h"
 #import "DisplayManager.h"
-#import "SubtleVolume.h"
 #import <GLKit/GLKit.h>
 #include <cassert>
 
@@ -31,6 +30,7 @@
 
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
+#include "Core/KeyMap.h"
 #include "Core/System.h"
 #include "Core/HLE/sceUsbCam.h"
 #include "Core/HLE/sceUsbGps.h"
@@ -79,7 +79,6 @@ public:
 	}
 
 	void StopThread() override {
-		renderManager_->WaitUntilQueueIdle();
 		renderManager_->StopThread();
 	}
 
@@ -94,6 +93,7 @@ static float dp_yscale = 1.0f;
 static double lastSelectPress = 0.0f;
 static double lastStartPress = 0.0f;
 static bool simulateAnalog = false;
+static bool iCadeConnectNotified = false;
 static bool threadEnabled = true;
 static bool threadStopped = false;
 static UITouch *g_touches[10];
@@ -115,12 +115,6 @@ static LocationHelper *locationHelper;
 #endif
 
 @end
-
-@interface ViewController () <SubtleVolumeDelegate> {
-	SubtleVolume *volume;
-}
-@end
-
 
 @implementation ViewController
 
@@ -154,11 +148,6 @@ static LocationHelper *locationHelper;
 #endif
 	}
 	return self;
-}
-
-- (void)subtleVolume:(SubtleVolume *)volumeView willChange:(CGFloat)value {
-}
-- (void)subtleVolume:(SubtleVolume *)volumeView didChange:(CGFloat)value {
 }
 
 - (void)shareText:(NSString *)text {
@@ -211,8 +200,8 @@ static LocationHelper *locationHelper;
 
 	graphicsContext->ThreadStart();
 
-	dp_xscale = (float)dp_xres / (float)pixel_xres;
-	dp_yscale = (float)dp_yres / (float)pixel_yres;
+	dp_xscale = (float)g_display.dp_xres / (float)g_display.pixel_xres;
+	dp_yscale = (float)g_display.dp_yres / (float)g_display.pixel_yres;
 	
 	/*self.iCadeView = [[iCadeReaderView alloc] init];
 	[self.view addSubview:self.iCadeView];
@@ -226,25 +215,6 @@ static LocationHelper *locationHelper;
 		}
 	}
 #endif
-	
-	CGFloat margin = 0;
-	CGFloat height = 16;
-	volume = [[SubtleVolume alloc]
-			  initWithStyle:SubtleVolumeStylePlain
-			  frame:CGRectMake(
-							   margin,   // X
-							   0,        // Y
-							   self.view.frame.size.width-(margin*2), // width
-							   height    // height
-							)];
-	
-	volume.padding = 7;
-	volume.barTintColor = [UIColor blackColor];
-	volume.barBackgroundColor = [UIColor whiteColor];
-	volume.animation = SubtleVolumeAnimationSlideDown;
-	volume.delegate = self;
-	[self.view addSubview:volume];
-	[self.view bringSubviewToFront:volume];
 
 	cameraHelper = [[CameraHelper alloc] init];
 	[cameraHelper setDelegate:self];
@@ -273,11 +243,6 @@ static LocationHelper *locationHelper;
 	});
 }
 
-- (void)didReceiveMemoryWarning
-{
-	[super didReceiveMemoryWarning];
-}
-
 - (void)appWillTerminate:(NSNotification *)notification
 {
 	[self shutdown];
@@ -287,11 +252,6 @@ static LocationHelper *locationHelper;
 {
 	if (sharedViewController == nil) {
 		return;
-	}
-	
-	if(volume) {
-		[volume removeFromSuperview];
-		volume = nil;
 	}
 
 	Audio_Shutdown();
@@ -507,6 +467,11 @@ int ToTouchID(UITouch *uiTouch, bool allowAllocate) {
 
 - (void)buttonUp:(iCadeState)button
 {
+	if (!iCadeConnectNotified) {
+		iCadeConnectNotified = true;
+		KeyMap::NotifyPadConnected(DEVICE_ID_PAD_0, "iCade");
+	}
+
 	if (button == iCadeButtonA) {
 		// Pressing Select twice within 1 second toggles the DPad between
 		//     normal operation and simulating the Analog stick.

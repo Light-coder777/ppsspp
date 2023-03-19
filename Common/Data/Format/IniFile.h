@@ -11,6 +11,8 @@
 
 #include "Common/File/Path.h"
 
+class VFSInterface;
+
 class Section {
 	friend class IniFile;
 
@@ -25,14 +27,16 @@ public:
 
 	std::map<std::string, std::string> ToMap() const;
 
-	std::string* GetLine(const char* key, std::string* valueOut, std::string* commentOut);
+	std::string *GetLine(const char* key, std::string* valueOut, std::string* commentOut);
+	const std::string *GetLine(const char* key, std::string* valueOut, std::string* commentOut) const;
+
 	void Set(const char* key, const char* newValue);
 	void Set(const char* key, const std::string& newValue, const std::string& defaultValue);
 
 	void Set(const std::string &key, const std::string &value) {
 		Set(key.c_str(), value.c_str());
 	}
-	bool Get(const char* key, std::string* value, const char* defaultValue);
+	bool Get(const char* key, std::string* value, const char* defaultValue) const;
 
 	void Set(const char* key, uint32_t newValue);
 	void Set(const char* key, uint64_t newValue);
@@ -57,13 +61,13 @@ public:
 
 	void AddComment(const std::string &comment);
 
-	bool Get(const char* key, int* value, int defaultValue = 0);
-	bool Get(const char* key, uint32_t* value, uint32_t defaultValue = 0);
-	bool Get(const char* key, uint64_t* value, uint64_t defaultValue = 0);
-	bool Get(const char* key, bool* value, bool defaultValue = false);
-	bool Get(const char* key, float* value, float defaultValue = false);
-	bool Get(const char* key, double* value, double defaultValue = false);
-	bool Get(const char* key, std::vector<std::string>& values);
+	bool Get(const char* key, int* value, int defaultValue = 0) const;
+	bool Get(const char* key, uint32_t* value, uint32_t defaultValue = 0) const;
+	bool Get(const char* key, uint64_t* value, uint64_t defaultValue = 0) const;
+	bool Get(const char* key, bool* value, bool defaultValue = false) const;
+	bool Get(const char* key, float* value, float defaultValue = false) const;
+	bool Get(const char* key, double* value, double defaultValue = false) const;
+	bool Get(const char* key, std::vector<std::string>& values) const;
 
 	bool operator < (const Section& other) const {
 		return name_ < other.name_;
@@ -84,7 +88,7 @@ public:
 	bool Load(const Path &path);
 	bool Load(const std::string &filename) { return Load(Path(filename)); }
 	bool Load(std::istream &istream);
-	bool LoadFromVFS(const std::string &filename);
+	bool LoadFromVFS(VFSInterface &vfs, const std::string &filename);
 
 	bool Save(const Path &path);
 	bool Save(const std::string &filename) { return Save(Path(filename)); }

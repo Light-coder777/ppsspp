@@ -116,6 +116,10 @@ __attribute__((format(printf, 5, 6)))
 #endif
 ;
 
+bool HitAnyAsserts();
+void ResetHitAnyAsserts();
+void SetExtraAssertInfo(const char *info);
+
 #if defined(__ANDROID__)
 // Tricky macro to get the basename, that also works if *built* on Win32.
 // Doesn't mean this macro can be used on Win32 though.
@@ -129,7 +133,7 @@ __attribute__((format(printf, 5, 6)))
 
 #define _dbg_assert_(_a_) \
 	if (!(_a_)) {\
-		if (!HandleAssert(__FUNCTION__, __FILENAME__, __LINE__, #_a_, "*** Assertion ***\n")) Crash(); \
+		if (!HandleAssert(__FUNCTION__, __FILENAME__, __LINE__, #_a_, "Assert!\n")) Crash(); \
 	}
 
 #define _dbg_assert_msg_(_a_, ...) \
@@ -148,7 +152,7 @@ __attribute__((format(printf, 5, 6)))
 
 #define _assert_(_a_) \
 	if (!(_a_)) {\
-		if (!HandleAssert(__FUNCTION__, __FILENAME__, __LINE__, #_a_, "*** Assertion ***\n")) Crash(); \
+		if (!HandleAssert(__FUNCTION__, __FILENAME__, __LINE__, #_a_, "Assert!\n")) Crash(); \
 	}
 
 #define _assert_msg_(_a_, ...) \

@@ -1,6 +1,8 @@
 // Headless version of PPSSPP, for testing using http://code.google.com/p/pspautotests/ .
 // See headless.txt.
 // To build on non-windows systems, just run CMake in the SDL directory, it will build both a normal ppsspp and the headless version.
+// Example command line to run a test in the VS debugger (useful to debug failures):
+// > --root pspautotests/tests/../ --compare --timeout=5 --graphics=software pspautotests/tests/cpu/cpu_alu/cpu_alu.prx
 
 #include "ppsspp_config.h"
 #include <cstdio>
@@ -14,9 +16,16 @@
 #include "Common/System/NativeApp.h"
 #include "Common/System/System.h"
 
+#include "Common/CommonWindows.h"
+#if PPSSPP_PLATFORM(WINDOWS)
+#include <timeapi.h>
+#else
+#include <csignal>
+#endif
 #include "Common/CPUDetect.h"
 #include "Common/File/VFS/VFS.h"
-#include "Common/File/VFS/AssetReader.h"
+#include "Common/File/VFS/ZipFileReader.h"
+#include "Common/File/VFS/DirectoryReader.h"
 #include "Common/File/FileUtil.h"
 #include "Common/GraphicsContext.h"
 #include "Common/TimeUtil.h"
@@ -57,7 +66,7 @@ bool audioRecording_State() { return false; }
 
 class PrintfLogger : public LogListener {
 public:
-	void Log(const LogMessage &message) {
+	void Log(const LogMessage &message) override {
 		switch (message.level) {
 		case LogTypes::LVERBOSE:
 			fprintf(stderr, "V %s", message.msg.c_str());
@@ -89,9 +98,13 @@ void NativeResized() { }
 
 std::string System_GetProperty(SystemProperty prop) { return ""; }
 std::vector<std::string> System_GetPropertyStringVec(SystemProperty prop) { return std::vector<std::string>(); }
-int System_GetPropertyInt(SystemProperty prop) { return -1; }
+int System_GetPropertyInt(SystemProperty prop) {
+	if (prop == SYSPROP_SYSTEMVERSION)
+		return 31;
+	return -1;
+}
 float System_GetPropertyFloat(SystemProperty prop) { return -1.0f; }
-bool System_GetPropertyBool(SystemProperty prop) { 
+bool System_GetPropertyBool(SystemProperty prop) {
 	switch (prop) {
 		case SYSPROP_CAN_JIT:
 			return true;
@@ -116,15 +129,12 @@ int printUsage(const char *progname, const char *reason)
 	fprintf(stderr, "  -m, --mount umd.cso   mount iso on umd1:\n");
 	fprintf(stderr, "  -r, --root some/path  mount path on host0: (elfs must be in here)\n");
 	fprintf(stderr, "  -l, --log             full log output, not just emulated printfs\n");
-	fprintf(stderr, " --debugger=PORT        enable websocket debugger and break at start\n");
+	fprintf(stderr, "  --debugger=PORT       enable websocket debugger and break at start\n");
 
-#if defined(HEADLESSHOST_CLASS)
-	{
-		fprintf(stderr, "  --graphics=BACKEND    use the full gpu backend (slower)\n");
-		fprintf(stderr, "                        options: gles, software, directx9, etc.\n");
-		fprintf(stderr, "  --screenshot=FILE     compare against a screenshot\n");
-	}
-#endif
+	fprintf(stderr, "  --graphics=BACKEND    use a different gpu backend\n");
+	fprintf(stderr, "                        options: gles, software, directx9, etc.\n");
+	fprintf(stderr, "  --screenshot=FILE     compare against a screenshot\n");
+	fprintf(stderr, "  --max-mse=NUMBER      maximum allowed MSE error for screenshot\n");
 	fprintf(stderr, "  --timeout=SECONDS     abort test it if takes longer than SECONDS\n");
 
 	fprintf(stderr, "  -v, --verbose         show the full passed/failed result\n");
@@ -132,6 +142,7 @@ int printUsage(const char *progname, const char *reason)
 	fprintf(stderr, "  --ir                  use ir interpreter\n");
 	fprintf(stderr, "  -j                    use jit (default)\n");
 	fprintf(stderr, "  -c, --compare         compare with output in file.expected\n");
+	fprintf(stderr, "  --bench               run multiple times and output speed\n");
 	fprintf(stderr, "\nSee headless.txt for details.\n");
 
 	return 1;
@@ -151,17 +162,24 @@ static HeadlessHost *getHost(GPUCore gpuCore) {
 	}
 }
 
-bool RunAutoTest(HeadlessHost *headlessHost, CoreParameter &coreParameter, bool autoCompare, bool verbose, double timeout)
-{
+struct AutoTestOptions {
+	double timeout;
+	double maxScreenshotError;
+	bool compare : 1;
+	bool verbose : 1;
+	bool bench : 1;
+};
+
+bool RunAutoTest(HeadlessHost *headlessHost, CoreParameter &coreParameter, const AutoTestOptions &opt) {
 	// Kinda ugly, trying to guesstimate the test name from filename...
 	currentTestName = GetTestName(coreParameter.fileToStart);
 
 	std::string output;
-	if (autoCompare)
+	if (opt.compare || opt.bench)
 		coreParameter.collectEmuLog = &output;
 
 	std::string error_string;
-	if (!PSP_Init(coreParameter, &error_string)) {
+	if (!PSP_InitStart(coreParameter, &error_string)) {
 		fprintf(stderr, "Failed to start '%s'. Error: %s\n", coreParameter.fileToStart.c_str(), error_string.c_str());
 		printf("TESTERROR\n");
 		TeamCityPrint("testIgnored name='%s' message='PRX/ELF missing'", currentTestName.c_str());
@@ -171,27 +189,33 @@ bool RunAutoTest(HeadlessHost *headlessHost, CoreParameter &coreParameter, bool 
 
 	TeamCityPrint("testStarted name='%s' captureStandardOutput='true'", currentTestName.c_str());
 
+	if (opt.compare)
+		headlessHost->SetComparisonScreenshot(ExpectedScreenshotFromFilename(coreParameter.fileToStart), opt.maxScreenshotError);
+
+	while (!PSP_InitUpdate(&error_string))
+		sleep_ms(1);
+	if (!PSP_IsInited()) {
+		TeamCityPrint("testFailed name='%s' message='Startup failed'", currentTestName.c_str());
+		TeamCityPrint("testFinished name='%s'", currentTestName.c_str());
+		GitHubActionsPrint("error", "Test init failed for %s", currentTestName.c_str());
+		return false;
+	}
+
 	host->BootDone();
-
-	if (autoCompare)
-		headlessHost->SetComparisonScreenshot(ExpectedScreenshotFromFilename(coreParameter.fileToStart));
-
-	bool passed = true;
-	// TODO: We must have some kind of stack overflow or we're not following the ABI right.
-	// This gets trashed if it's not static.
-	static double deadline;
-	deadline = time_now_d() + timeout;
 
 	Core_UpdateDebugStats(g_Config.bShowDebugStats || g_Config.bLogFrameDrops);
 
 	PSP_BeginHostFrame();
-	if (coreParameter.graphicsContext && coreParameter.graphicsContext->GetDrawContext())
-		coreParameter.graphicsContext->GetDrawContext()->BeginFrame();
+	Draw::DrawContext *draw = coreParameter.graphicsContext ? coreParameter.graphicsContext->GetDrawContext() : nullptr;
+	if (draw)
+		draw->BeginFrame();
 
+	bool passed = true;
+	double deadline = time_now_d() + opt.timeout;
 	coreState = coreParameter.startBreak ? CORE_STEPPING : CORE_RUNNING;
 	while (coreState == CORE_RUNNING || coreState == CORE_STEPPING)
 	{
-		int blockTicks = usToCycles(1000000 / 10);
+		int blockTicks = (int)usToCycles(1000000 / 10);
 		PSP_RunLoopFor(blockTicks);
 
 		// If we were rendering, this might be a nice time to do something about it.
@@ -204,43 +228,83 @@ bool RunAutoTest(HeadlessHost *headlessHost, CoreParameter &coreParameter, bool 
 		}
 		if (time_now_d() > deadline) {
 			// Don't compare, print the output at least up to this point, and bail.
-			printf("%s", output.c_str());
-			passed = false;
+			if (!opt.bench) {
+				printf("%s", output.c_str());
 
-			host->SendDebugOutput("TIMEOUT\n");
-			TeamCityPrint("testFailed name='%s' message='Test timeout'", currentTestName.c_str());
-			GitHubActionsPrint("error", "Test timeout for %s", currentTestName.c_str());
+				host->SendDebugOutput("TIMEOUT\n");
+				TeamCityPrint("testFailed name='%s' message='Test timeout'", currentTestName.c_str());
+				GitHubActionsPrint("error", "Test timeout for %s", currentTestName.c_str());
+			}
+
+			passed = false;
 			Core_Stop();
 		}
 	}
 	PSP_EndHostFrame();
 
-	if (coreParameter.graphicsContext && coreParameter.graphicsContext->GetDrawContext())
-		coreParameter.graphicsContext->GetDrawContext()->EndFrame();
+	if (draw) {
+		draw->BindFramebufferAsRenderTarget(nullptr, { Draw::RPAction::CLEAR, Draw::RPAction::DONT_CARE, Draw::RPAction::DONT_CARE }, "Headless");
+		// Vulkan may get angry if we don't do a final present.
+		if (gpu)
+			gpu->CopyDisplayToOutput(true);
+
+		draw->EndFrame();
+	}
 
 	PSP_Shutdown();
 
-	headlessHost->FlushDebugOutput();
+	if (!opt.bench)
+		headlessHost->FlushDebugOutput();
 
-	if (autoCompare && passed)
-		passed = CompareOutput(coreParameter.fileToStart, output, verbose);
+	if (opt.compare && passed)
+		passed = CompareOutput(coreParameter.fileToStart, output, opt.verbose);
 
 	TeamCityPrint("testFinished name='%s'", currentTestName.c_str());
 
 	return passed;
 }
 
+std::vector<std::string> ReadFromListFile(const std::string &listFilename) {
+	std::vector<std::string> testFilenames;
+	char temp[2048]{};
+
+	if (listFilename == "-") {
+		while (scanf("%2047s", temp) == 1)
+			testFilenames.push_back(temp);
+	} else {
+		FILE *fp = File::OpenCFile(Path(listFilename), "rt");
+		if (!fp) {
+			fprintf(stderr, "Unable to open '%s' as a list file\n", listFilename.c_str());
+			return testFilenames;
+		}
+
+		while (fscanf(fp, "%2047s", temp) == 1)
+			testFilenames.push_back(temp);
+		fclose(fp);
+	}
+
+	return testFilenames;
+}
+
 int main(int argc, const char* argv[])
 {
 	PROFILE_INIT();
+#if PPSSPP_PLATFORM(WINDOWS)
+	timeBeginPeriod(1);
+#else
+	// Ignore sigpipe.
+	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+		perror("Unable to ignore SIGPIPE");
+	}
+#endif
 
 #if defined(_DEBUG) && defined(_MSC_VER)
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
+	AutoTestOptions testOptions{};
+	testOptions.timeout = std::numeric_limits<double>::infinity();
 	bool fullLog = false;
-	bool autoCompare = false;
-	bool verbose = false;
 	const char *stateToLoad = 0;
 	GPUCore gpuCore = GPUCORE_SOFTWARE;
 	CPUCore cpuCore = CPUCore::JIT;
@@ -250,7 +314,6 @@ int main(int argc, const char* argv[])
 	const char *mountIso = nullptr;
 	const char *mountRoot = nullptr;
 	const char *screenshotFilename = nullptr;
-	float timeout = std::numeric_limits<float>::infinity();
 
 	for (int i = 1; i < argc; i++)
 	{
@@ -275,9 +338,11 @@ int main(int argc, const char* argv[])
 		else if (!strcmp(argv[i], "--ir"))
 			cpuCore = CPUCore::IR_JIT;
 		else if (!strcmp(argv[i], "-c") || !strcmp(argv[i], "--compare"))
-			autoCompare = true;
+			testOptions.compare = true;
+		else if (!strcmp(argv[i], "--bench"))
+			testOptions.bench = true;
 		else if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose"))
-			verbose = true;
+			testOptions.verbose = true;
 		else if (!strncmp(argv[i], "--graphics=", strlen("--graphics=")) && strlen(argv[i]) > strlen("--graphics="))
 		{
 			const char *gpuName = argv[i] + strlen("--graphics=");
@@ -305,7 +370,9 @@ int main(int argc, const char* argv[])
 		} else if (!strncmp(argv[i], "--screenshot=", strlen("--screenshot=")) && strlen(argv[i]) > strlen("--screenshot="))
 			screenshotFilename = argv[i] + strlen("--screenshot=");
 		else if (!strncmp(argv[i], "--timeout=", strlen("--timeout=")) && strlen(argv[i]) > strlen("--timeout="))
-			timeout = strtod(argv[i] + strlen("--timeout="), NULL);
+			testOptions.timeout = strtod(argv[i] + strlen("--timeout="), nullptr);
+		else if (!strncmp(argv[i], "--max-mse=", strlen("--max-mse=")) && strlen(argv[i]) > strlen("--max-mse="))
+			testOptions.maxScreenshotError = strtod(argv[i] + strlen("--max-mse="), nullptr);
 		else if (!strncmp(argv[i], "--debugger=", strlen("--debugger=")) && strlen(argv[i]) > strlen("--debugger="))
 			debuggerPort = (int)strtoul(argv[i] + strlen("--debugger="), NULL, 10);
 		else if (!strcmp(argv[i], "--teamcity"))
@@ -318,16 +385,8 @@ int main(int argc, const char* argv[])
 			testFilenames.push_back(argv[i]);
 	}
 
-	// TODO: Allow a filename here?
-	if (testFilenames.size() == 1 && testFilenames[0] == "@-")
-	{
-		testFilenames.clear();
-		char temp[2048];
-		temp[2047] = '\0';
-
-		while (scanf("%2047s", temp) == 1)
-			testFilenames.push_back(temp);
-	}
+	if (testFilenames.size() == 1 && testFilenames[0][0] == '@')
+		testFilenames = ReadFromListFile(testFilenames[0].substr(1));
 
 	if (testFilenames.empty())
 		return printUsage(argv[0], argc <= 1 ? NULL : "No executables specified");
@@ -363,7 +422,7 @@ int main(int argc, const char* argv[])
 	coreParameter.mountIso = mountIso ? Path(std::string(mountIso)) : Path();
 	coreParameter.mountRoot = mountRoot ? Path(std::string(mountRoot)) : Path();
 	coreParameter.startBreak = false;
-	coreParameter.printfEmuLog = !autoCompare;
+	coreParameter.printfEmuLog = !testOptions.compare;
 	coreParameter.headLess = true;
 	coreParameter.renderScaleFactor = 1;
 	coreParameter.renderWidth = 480;
@@ -376,11 +435,13 @@ int main(int argc, const char* argv[])
 	g_Config.bFirstRun = false;
 	g_Config.bIgnoreBadMemAccess = true;
 	// Never report from tests.
-	g_Config.sReportHost = "";
+	g_Config.sReportHost.clear();
 	g_Config.bAutoSaveSymbolMap = false;
-	g_Config.iRenderingMode = FB_BUFFERED_MODE;
+	g_Config.bSkipBufferEffects = false;
+	g_Config.bSkipGPUReadbacks = false;
 	g_Config.bHardwareTransform = true;
 	g_Config.iAnisotropyLevel = 0;  // When testing mipmapping we really don't want this.
+	g_Config.iMultiSampleLevel = 0;
 	g_Config.bVertexCache = false;
 	g_Config.iLanguage = PSP_SYSTEMPARAM_LANGUAGE_ENGLISH;
 	g_Config.iTimeFormat = PSP_SYSTEMPARAM_TIME_FORMAT_24HR;
@@ -395,13 +456,12 @@ int main(int argc, const char* argv[])
 	g_Config.bEnableLogging = fullLog;
 	g_Config.bSoftwareSkinning = true;
 	g_Config.bVertexDecoderJit = true;
+	g_Config.bSoftwareRendering = coreParameter.gpuCore == GPUCORE_SOFTWARE;
 	g_Config.bSoftwareRenderingJit = true;
-	g_Config.bBlockTransferGPU = true;
 	g_Config.iSplineBezierQuality = 2;
 	g_Config.bHighQualityDepth = true;
 	g_Config.bMemStickInserted = true;
 	g_Config.iMemStickSizeGB = 16;
-	g_Config.bFragmentTestCache = true;
 	g_Config.bEnableWlan = true;
 	g_Config.sMACAddress = "12:34:56:78:9A:BC";
 	g_Config.iFirmwareVersion = PSP_DEFAULT_FIRMWARE;
@@ -409,37 +469,50 @@ int main(int argc, const char* argv[])
 	g_Config.iGlobalVolume = VOLUME_FULL;
 	g_Config.iReverbVolume = VOLUME_FULL;
 
-#ifdef _WIN32
+#if PPSSPP_PLATFORM(WINDOWS)
 	g_Config.internalDataDirectory.clear();
 	InitSysDirectories();
 #endif
 
-#if !defined(__ANDROID__) && !defined(_WIN32)
+	Path executablePath = File::GetExeDirectory();
+#if !PPSSPP_PLATFORM(ANDROID) && !PPSSPP_PLATFORM(WINDOWS)
 	g_Config.memStickDirectory = Path(std::string(getenv("HOME"))) / ".ppsspp";
+	g_Config.flash0Directory = executablePath / "assets/flash0";
 #endif
 
 	// Try to find the flash0 directory.  Often this is from a subdirectory.
-	for (int i = 0; i < 4 && !File::Exists(g_Config.flash0Directory); ++i) {
-		if (File::Exists(g_Config.flash0Directory / ".." / "assets/flash0"))
-			g_Config.flash0Directory = g_Config.flash0Directory / ".." / "assets/flash0";
-		else
-			g_Config.flash0Directory = g_Config.flash0Directory / ".." / ".." / "flash0";
+	Path nextPath = executablePath;
+	for (int i = 0; i < 5; ++i) {
+		if (File::Exists(nextPath / "assets/flash0")) {
+			g_Config.flash0Directory = nextPath / "assets/flash0";
+#if !PPSSPP_PLATFORM(ANDROID)
+			g_VFS.Register("", new DirectoryReader(nextPath / "assets"));
+#endif
+			break;
+		}
+
+		if (!nextPath.CanNavigateUp())
+			break;
+		nextPath = nextPath.NavigateUp();
 	}
-	// Or else, maybe in the executable's dir.
-	if (!File::Exists(g_Config.flash0Directory))
-		g_Config.flash0Directory = File::GetExeDirectory() / "assets/flash0";
 
-	if (screenshotFilename != 0)
-		headlessHost->SetComparisonScreenshot(Path(std::string(screenshotFilename)));
+	if (screenshotFilename)
+		headlessHost->SetComparisonScreenshot(Path(std::string(screenshotFilename)), testOptions.maxScreenshotError);
+	headlessHost->SetWriteFailureScreenshot(!teamCityMode && !getenv("GITHUB_ACTIONS") && !testOptions.bench);
 
-#ifdef __ANDROID__
+#if PPSSPP_PLATFORM(ANDROID)
 	// For some reason the debugger installs it with this name?
 	if (File::Exists(Path("/data/app/org.ppsspp.ppsspp-2.apk"))) {
-		VFSRegister("", new ZipAssetReader("/data/app/org.ppsspp.ppsspp-2.apk", "assets/"));
+		g_VFS.Register("", ZipFileReader::Create(Path("/data/app/org.ppsspp.ppsspp-2.apk"), "assets/"));
 	}
 	if (File::Exists(Path("/data/app/org.ppsspp.ppsspp.apk"))) {
-		VFSRegister("", new ZipAssetReader("/data/app/org.ppsspp.ppsspp.apk", "assets/"));
+		g_VFS.Register("", ZipFileReader::Create(Path("/data/app/org.ppsspp.ppsspp.apk"), "assets/"));
 	}
+#elif PPSSPP_PLATFORM(LINUX)
+	g_VFS.Register("", new DirectoryReader(Path("/usr/local/share/ppsspp/assets")));
+	g_VFS.Register("", new DirectoryReader(Path("/usr/local/share/games/ppsspp/assets")));
+	g_VFS.Register("", new DirectoryReader(Path("/usr/share/ppsspp/assets")));
+	g_VFS.Register("", new DirectoryReader(Path("/usr/share/games/ppsspp/assets")));
 #endif
 
 	UpdateUIState(UISTATE_INGAME);
@@ -458,14 +531,28 @@ int main(int argc, const char* argv[])
 	for (size_t i = 0; i < testFilenames.size(); ++i)
 	{
 		coreParameter.fileToStart = Path(testFilenames[i]);
-		if (autoCompare)
+		if (testOptions.compare)
 			printf("%s:\n", coreParameter.fileToStart.c_str());
-		bool passed = RunAutoTest(headlessHost, coreParameter, autoCompare, verbose, timeout);
-		if (autoCompare)
-		{
+		bool passed = RunAutoTest(headlessHost, coreParameter, testOptions);
+		if (testOptions.bench) {
+			double st = time_now_d();
+			double deadline = st + testOptions.timeout;
+			double runs = 0.0;
+			for (int i = 0; i < 100; ++i) {
+				RunAutoTest(headlessHost, coreParameter, testOptions);
+				runs++;
+
+				if (time_now_d() > deadline)
+					break;
+			}
+			double et = time_now_d();
+
 			std::string testName = GetTestName(coreParameter.fileToStart);
-			if (passed)
-			{
+			printf("  %s - %f seconds average\n", testName.c_str(), (et - st) / runs);
+		}
+		if (testOptions.compare) {
+			std::string testName = GetTestName(coreParameter.fileToStart);
+			if (passed) {
 				passedTests.push_back(testName);
 				printf("  %s - passed!\n", testName.c_str());
 			}
@@ -474,8 +561,7 @@ int main(int argc, const char* argv[])
 		}
 	}
 
-	if (autoCompare)
-	{
+	if (testOptions.compare) {
 		printf("%d tests passed, %d tests failed.\n", (int)passedTests.size(), (int)failedTests.size());
 		if (!failedTests.empty())
 		{
@@ -495,9 +581,17 @@ int main(int argc, const char* argv[])
 	host = nullptr;
 	headlessHost = nullptr;
 
-	VFSShutdown();
+	g_VFS.Clear();
 	LogManager::Shutdown();
 	delete printfLogger;
 
+#if PPSSPP_PLATFORM(WINDOWS)
+	timeEndPeriod(1);
+#endif
+
+	g_threadManager.Teardown();
+
+	if (!failedTests.empty() && !teamCityMode)
+		return 1;
 	return 0;
 }

@@ -2,12 +2,10 @@
 
 #include "Common/GPU/D3D9/D3D9StateCache.h"
 
-namespace DX9 {
-
 DirectXState dxstate;
 
-LPDIRECT3DDEVICE9 pD3Ddevice = nullptr;
-LPDIRECT3DDEVICE9EX pD3DdeviceEx = nullptr;
+LPDIRECT3DDEVICE9 pD3Ddevice9 = nullptr;
+LPDIRECT3DDEVICE9EX pD3DdeviceEx9 = nullptr;
 
 int DirectXState::state_count = 0;
 
@@ -50,9 +48,7 @@ void DirectXState::Restore() {
 	stencilTest.restore(); count++;
 	stencilOp.restore(); count++;
 	stencilFunc.restore(); count++;
-	stencilMask.restore(); count++;
-
-	dither.restore(); count++;
+	stencilWriteMask.restore(); count++;
 
 	texMinFilter.restore(); count++;
 	texMagFilter.restore(); count++;
@@ -61,8 +57,7 @@ void DirectXState::Restore() {
 	texMaxMipLevel.restore(); count++;
 	texAddressU.restore(); count++;
 	texAddressV.restore(); count++;
+	texAddressW.restore(); count++;
 }
-
-}  // namespace DX9
 
 #endif  // _MSC_VER

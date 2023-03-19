@@ -150,7 +150,7 @@ static std::string RemotePathForRecent(const std::string &filename) {
 }
 
 static Path LocalFromRemotePath(const std::string &path) {
-	for (const std::string &filename : g_Config.recentIsos) {
+	for (const std::string &filename : g_Config.RecentIsos()) {
 		std::string basename = RemotePathForRecent(filename);
 		if (basename == path) {
 			return Path(filename);
@@ -212,11 +212,13 @@ static void DiscHandler(const http::Request &request, const Path &filename) {
 }
 
 static void HandleListing(const http::Request &request) {
+	AndroidJNIThreadContext jniContext;
+
 	request.WriteHttpResponseHeader("1.0", 200, -1, "text/plain");
 	request.Out()->Printf("/\n");
 	if (serverFlags & (int)WebServerFlags::DISCS) {
 		// List the current discs in their recent order.
-		for (const std::string &filename : g_Config.recentIsos) {
+		for (const std::string &filename : g_Config.RecentIsos()) {
 			std::string basename = RemotePathForRecent(filename);
 			if (!basename.empty()) {
 				request.Out()->Printf("%s\n", basename.c_str());
@@ -235,7 +237,7 @@ static bool ServeDebuggerFile(const http::Request &request) {
 		return false;
 
 	size_t size;
-	uint8_t *data = VFSReadFile(filename, &size);
+	uint8_t *data = g_VFS.ReadFile(filename, &size);
 	if (!data)
 		return false;
 
@@ -248,7 +250,7 @@ static bool ServeDebuggerFile(const http::Request &request) {
 	} else if (ext == ".js") {
 		mimeType = "application/javascript";
 	} else if (ext == ".svg") {
-		mimeType = "image/svg";
+		mimeType = "image/svg+xml";
 	} else if (ext == ".png") {
 		mimeType = "image/png";
 	} else if (ext == ".css") {
@@ -269,6 +271,8 @@ static void RedirectToDebugger(const http::Request &request) {
 }
 
 static void HandleFallback(const http::Request &request) {
+	AndroidJNIThreadContext jniContext;
+
 	if (serverFlags & (int)WebServerFlags::DISCS) {
 		Path filename = LocalFromRemotePath(request.resource());
 		if (!filename.empty()) {
@@ -293,11 +297,13 @@ static void HandleFallback(const http::Request &request) {
 }
 
 static void ForwardDebuggerRequest(const http::Request &request) {
+	AndroidJNIThreadContext jniContext;
+
 	if (serverFlags & (int)WebServerFlags::DEBUGGER) {
 		// Check if this is a websocket request...
 		std::string upgrade;
 		if (!request.GetHeader("upgrade", &upgrade)) {
-			upgrade = "";
+			upgrade.clear();
 		}
 
 		// Yes - proceed with the socket.
@@ -313,6 +319,8 @@ static void ForwardDebuggerRequest(const http::Request &request) {
 
 static void ExecuteWebServer() {
 	SetCurrentThreadName("HTTPServer");
+
+	AndroidJNIThreadContext context;  // Destructor detaches.
 
 	auto http = new http::Server(new NewThreadExecutor());
 	http->RegisterHandler("/", &HandleListing);

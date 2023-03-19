@@ -18,16 +18,12 @@
 //To get a class instance to be able to access it, just use 
 //  CtrlDisAsmView::getFrom(GetDlgItem(yourdialog, IDC_yourid)).
 
-#include "../../Core/Debugger/DebugInterface.h"
-#include "../../Core/Debugger/DisassemblyManager.h"
-
-
-#include "Common/CommonWindows.h"
 #include <vector>
 #include <algorithm>
-
-using std::min;
-using std::max;
+#include "Common/CommonWindows.h"
+#include "Common/Log.h"
+#include "Core/Debugger/DebugInterface.h"
+#include "Core/Debugger/DisassemblyManager.h"
 
 class CtrlDisAsmView
 {
@@ -68,6 +64,12 @@ class CtrlDisAsmView
 	bool dontRedraw;
 	bool keyTaken;
 
+	enum class CopyInstructionsMode {
+		OPCODES,
+		DISASM,
+		ADDRESSES,
+	};
+
 	void assembleOpcode(u32 address, std::string defaultText);
 	std::string disassembleRange(u32 start, u32 size);
 	void disassembleToFile();
@@ -76,8 +78,9 @@ class CtrlDisAsmView
 	void calculatePixelPositions();
 	bool getDisasmAddressText(u32 address, char* dest, bool abbreviateLabels, bool showData);
 	void updateStatusBarText();
-	void drawBranchLine(HDC hdc, std::map<u32,int>& addressPositions, BranchLine& line);
-	void copyInstructions(u32 startAddr, u32 endAddr, bool withDisasm);
+	void drawBranchLine(HDC hdc, std::map<u32, int> &addressPositions, const BranchLine &line);
+	void CopyInstructions(u32 startAddr, u32 endAddr, CopyInstructionsMode mode);
+	void NopInstructions(u32 startAddr, u32 endAddr);
 	std::set<std::string> getSelectedLineArguments();
 	void drawArguments(HDC hdc, const DisassemblyLineInfo &line, int x, int y, int textColor, const std::set<std::string> &currentArguments);
 
@@ -124,6 +127,8 @@ public:
 
 	void gotoAddr(unsigned int addr)
 	{
+		if (positionLocked_ != 0)
+			return;
 		u32 windowEnd = manager.getNthNextAddress(windowStart,visibleRows);
 		u32 newAddress = manager.getStartAddress(addr);
 
@@ -173,4 +178,16 @@ public:
 		selectRangeEnd = extend ? std::max(selectRangeEnd, after) : after;
 		updateStatusBarText();
 	}
+
+	void LockPosition() {
+		positionLocked_++;
+	}
+	void UnlockPosition() {
+		positionLocked_--;
+		_assert_(positionLocked_ >= 0);
+	}
+
+private:
+	bool redrawScheduled_ = false;
+	int positionLocked_ = 0;
 };

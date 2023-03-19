@@ -38,7 +38,7 @@ public:
 
 	void render() override;
 
-	std::string tag() const override { return "game"; }
+	const char *tag() const override { return "Game"; }
 
 protected:
 	void CreateViews() override;
@@ -72,6 +72,7 @@ private:
 	UI::TextView *tvInstallDataSize_ = nullptr;
 	UI::TextView *tvRegion_ = nullptr;
 	UI::TextView *tvCRC_ = nullptr;
+	UI::TextView *tvID_ = nullptr;
 
 	UI::Choice *btnGameSettings_ = nullptr;
 	UI::Choice *btnCreateGameConfig_ = nullptr;

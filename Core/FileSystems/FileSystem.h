@@ -34,6 +34,11 @@ enum FileAccess {
 	FILEACCESS_CREATE   = 8,
 	FILEACCESS_TRUNCATE = 16,
 	FILEACCESS_EXCL     = 32,
+
+	FILEACCESS_PSP_FLAGS = 63,  // Sum of all the above.
+
+	// Non-PSP flags
+	FILEACCESS_PPSSPP_QUIET = 128,
 };
 
 enum FileMove {
@@ -77,7 +82,7 @@ public:
 class SequentialHandleAllocator : public IHandleAllocator {
 public:
 	SequentialHandleAllocator() : handle_(1) {}
-	virtual u32 GetNewHandle() override {
+	u32 GetNewHandle() override {
 		u32 res = handle_++;
 		if (handle_ < 0) {
 			// Some code assumes it'll never become 0.
@@ -85,7 +90,7 @@ public:
 		}
 		return res;
 	}
-	virtual void FreeHandle(u32 handle) override {}
+	void FreeHandle(u32 handle) override {}
 private:
 	int handle_;
 };
@@ -118,7 +123,7 @@ public:
 	virtual ~IFileSystem() {}
 
 	virtual void DoState(PointerWrap &p) = 0;
-	virtual std::vector<PSPFileInfo> GetDirListing(std::string path) = 0;
+	virtual std::vector<PSPFileInfo> GetDirListing(const std::string &path, bool *exists = nullptr) = 0;
 	virtual int      OpenFile(std::string filename, FileAccess access, const char *devicename = nullptr) = 0;
 	virtual void     CloseFile(u32 handle) = 0;
 	virtual size_t   ReadFile(u32 handle, u8 *pointer, s64 size) = 0;
@@ -142,8 +147,13 @@ public:
 
 class EmptyFileSystem : public IFileSystem {
 public:
-	virtual void DoState(PointerWrap &p) override {}
-	std::vector<PSPFileInfo> GetDirListing(std::string path) override {std::vector<PSPFileInfo> vec; return vec;}
+	void DoState(PointerWrap &p) override {}
+	std::vector<PSPFileInfo> GetDirListing(const std::string &path, bool *exists = nullptr) override {
+		if (exists)
+			*exists = false;
+		std::vector<PSPFileInfo> vec;
+		return vec;
+	}
 	int      OpenFile(std::string filename, FileAccess access, const char *devicename = nullptr) override {return SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND;}
 	void     CloseFile(u32 handle) override {}
 	size_t   ReadFile(u32 handle, u8 *pointer, s64 size) override {return 0;}
@@ -153,14 +163,14 @@ public:
 	size_t   SeekFile(u32 handle, s32 position, FileMove type) override {return 0;}
 	PSPFileInfo GetFileInfo(std::string filename) override {PSPFileInfo f; return f;}
 	bool     OwnsHandle(u32 handle) override {return false;}
-	virtual bool MkDir(const std::string &dirname) override {return false;}
-	virtual bool RmDir(const std::string &dirname) override {return false;}
-	virtual int RenameFile(const std::string &from, const std::string &to) override {return -1;}
-	virtual bool RemoveFile(const std::string &filename) override {return false;}
-	virtual int Ioctl(u32 handle, u32 cmd, u32 indataPtr, u32 inlen, u32 outdataPtr, u32 outlen, int &usec) override {return SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED; }
-	virtual PSPDevType DevType(u32 handle) override { return PSPDevType::INVALID; }
-	virtual FileSystemFlags Flags() override { return FileSystemFlags::NONE; }
-	virtual u64 FreeSpace(const std::string &path) override { return 0; }
+	bool MkDir(const std::string &dirname) override {return false;}
+	bool RmDir(const std::string &dirname) override {return false;}
+	int RenameFile(const std::string &from, const std::string &to) override {return -1;}
+	bool RemoveFile(const std::string &filename) override {return false;}
+	int Ioctl(u32 handle, u32 cmd, u32 indataPtr, u32 inlen, u32 outdataPtr, u32 outlen, int &usec) override { return SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED; }
+	PSPDevType DevType(u32 handle) override { return PSPDevType::INVALID; }
+	FileSystemFlags Flags() override { return FileSystemFlags::NONE; }
+	u64 FreeSpace(const std::string &path) override { return 0; }
 	bool ComputeRecursiveDirSizeIfFast(const std::string &path, int64_t *size) override { return false; }
 };
 

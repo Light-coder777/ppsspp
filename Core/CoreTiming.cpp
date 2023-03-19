@@ -16,7 +16,9 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <atomic>
+#include <climits>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <set>
 #include <vector>
@@ -29,9 +31,7 @@
 #include "Core/Core.h"
 #include "Core/Config.h"
 #include "Core/HLE/sceKernelThread.h"
-#include "Core/HLE/sceDisplay.h"
 #include "Core/MIPS/MIPS.h"
-#include "Core/Reporting.h"
 
 static const int initialHz = 222000000;
 int CPU_HZ = 222000000;
@@ -191,7 +191,7 @@ void RestoreRegisterEvent(int &event_type, const char *name, TimedCallback callb
 		event_type = -1;
 	if (event_type == -1)
 		event_type = nextEventTypeRestoreId++;
-	if (event_type >= event_types.size()) {
+	if (event_type >= (int)event_types.size()) {
 		// Give it any unused event id starting from the end.
 		// Older save states with messed up ids have gaps near the end.
 		for (int i = (int)event_types.size() - 1; i >= 0; --i) {
@@ -201,7 +201,7 @@ void RestoreRegisterEvent(int &event_type, const char *name, TimedCallback callb
 			}
 		}
 	}
-	_assert_msg_(event_type >= 0 && event_type < event_types.size(), "Invalid event type %d", event_type);
+	_assert_msg_(event_type >= 0 && event_type < (int)event_types.size(), "Invalid event type %d", event_type);
 	event_types[event_type] = EventType{ callback, name };
 	usedEventTypes.insert(event_type);
 	restoredEventTypes.insert(event_type);
@@ -233,16 +233,14 @@ void Shutdown()
 	ClearPendingEvents();
 	UnregisterAllEvents();
 
-	while(eventPool)
-	{
+	while (eventPool) {
 		Event *ev = eventPool;
 		eventPool = ev->next;
 		delete ev;
 	}
 
 	std::lock_guard<std::mutex> lk(externalEventLock);
-	while(eventTsPool)
-	{
+	while (eventTsPool) {
 		Event *ev = eventTsPool;
 		eventTsPool = ev->next;
 		delete ev;
@@ -251,7 +249,12 @@ void Shutdown()
 
 u64 GetTicks()
 {
-	return (u64)globalTimer + slicelength - currentMIPS->downcount;
+	if (currentMIPS) {
+		return (u64)globalTimer + slicelength - currentMIPS->downcount;
+	} else {
+		// Reporting can actually end up here during weird task switching sequences on Android
+		return false;
+	}
 }
 
 u64 GetIdleTicks()
@@ -605,7 +608,6 @@ void Advance() {
 
 	if (!first) {
 		// This should never happen in PPSSPP.
-		// WARN_LOG_REPORT(TIME, "WARNING - no events in queue. Setting currentMIPS->downcount to 10000");
 		if (slicelength < 10000) {
 			slicelength += 10000;
 			currentMIPS->downcount += 10000;

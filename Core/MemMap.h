@@ -25,8 +25,6 @@
 #include <stddef.h>
 #endif
 
-// Includes
-#include "Common/Common.h"
 #include "Common/CommonTypes.h"
 #include "Common/Swap.h"
 #include "Core/Opcode.h"
@@ -142,11 +140,19 @@ u16 Read_U16(const u32 _Address);
 u32 Read_U32(const u32 _Address);
 u64 Read_U64(const u32 _Address);
 
-inline u8* GetPointerUnchecked(const u32 address) {
+inline u8* GetPointerWriteUnchecked(const u32 address) {
 #ifdef MASKED_PSP_MEMORY
 	return (u8 *)(base + (address & MEMVIEW32_MASK));
 #else
 	return (u8 *)(base + address);
+#endif
+}
+
+inline const u8* GetPointerUnchecked(const u32 address) {
+#ifdef MASKED_PSP_MEMORY
+	return (const u8 *)(base + (address & MEMVIEW32_MASK));
+#else
+	return (const u8 *)(base + address);
 #endif
 }
 
@@ -238,7 +244,12 @@ inline void Write_Float(float f, u32 address)
 	Write_U32(u, address);
 }
 
-u8* GetPointer(const u32 address);
+u8* GetPointerWrite(const u32 address);
+const u8* GetPointer(const u32 address);
+
+u8 *GetPointerWriteRange(const u32 address, const u32 size);
+const u8 *GetPointerRange(const u32 address, const u32 size);
+
 bool IsRAMAddress(const u32 address);
 inline bool IsVRAMAddress(const u32 address) {
 	return ((address & 0x3F800000) == 0x04000000);
@@ -269,16 +280,20 @@ inline const char* GetCharPointer(const u32 address) {
 	}
 }
 
+inline const char *GetCharPointerUnchecked(const u32 address) {
+	return (const char *)GetPointerUnchecked(address);
+}
+
 inline void MemcpyUnchecked(void *to_data, const u32 from_address, const u32 len) {
 	memcpy(to_data, GetPointerUnchecked(from_address), len);
 }
 
 inline void MemcpyUnchecked(const u32 to_address, const void *from_data, const u32 len) {
-	memcpy(GetPointerUnchecked(to_address), from_data, len);
+	memcpy(GetPointerWriteUnchecked(to_address), from_data, len);
 }
 
 inline void MemcpyUnchecked(const u32 to_address, const u32 from_address, const u32 len) {
-	MemcpyUnchecked(GetPointer(to_address), from_address, len);
+	MemcpyUnchecked(GetPointerWriteUnchecked(to_address), from_address, len);
 }
 
 inline bool IsValidAddress(const u32 address) {
@@ -320,6 +335,9 @@ inline bool IsValidRange(const u32 address, const u32 size) {
 }
 
 }  // namespace Memory
+
+// Avoiding a global include for NotifyMemInfo.
+void PSPPointerNotifyRW(int rw, uint32_t ptr, uint32_t bytes, const char *tag, size_t tagLen);
 
 template <typename T>
 struct PSPPointer
@@ -431,9 +449,35 @@ struct PSPPointer
 #endif
 	}
 
-	bool IsValid() const
+	bool IsValid() const {
+		return Memory::IsValidRange(ptr, (u32)sizeof(T));
+	}
+
+	T *PtrOrNull() {
+		if (IsValid())
+			return (T *)*this;
+		return nullptr;
+	}
+
+	const T *PtrOrNull() const {
+		if (IsValid())
+			return (const T *)*this;
+		return nullptr;
+	}
+
+	template <size_t tagLen>
+	void NotifyWrite(const char(&tag)[tagLen]) const {
+		PSPPointerNotifyRW(1, (uint32_t)ptr, (uint32_t)sizeof(T), tag, tagLen - 1);
+	}
+
+	template <size_t tagLen>
+	void NotifyRead(const char(&tag)[tagLen]) const {
+		PSPPointerNotifyRW(2, (uint32_t)ptr, (uint32_t)sizeof(T), tag, tagLen - 1);
+	}
+
+	size_t ElementSize() const
 	{
-		return Memory::IsValidAddress(ptr);
+		return sizeof(T);
 	}
 
 	static PSPPointer<T> Create(u32 ptr) {

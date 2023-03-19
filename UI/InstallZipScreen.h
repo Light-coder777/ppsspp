@@ -26,12 +26,14 @@
 
 class InstallZipScreen : public UIDialogScreenWithBackground {
 public:
-	InstallZipScreen(const Path &zipPath) : zipPath_(zipPath) {}
-	virtual void update() override;
-	virtual bool key(const KeyInput &key) override;
+	InstallZipScreen(const Path &zipPath);
+	void update() override;
+	bool key(const KeyInput &key) override;
+
+	const char *tag() const override { return "InstallZip"; }
 
 protected:
-	virtual void CreateViews() override;
+	void CreateViews() override;
 
 private:
 	UI::EventReturn OnInstall(UI::EventParams &params);

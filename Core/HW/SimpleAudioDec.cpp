@@ -120,7 +120,7 @@ bool SimpleAudio::OpenCodec(int block_align) {
 #endif  // USE_FFMPEG
 }
 
-void SimpleAudio::SetExtraData(u8 *data, int size, int wav_bytes_per_packet) {
+void SimpleAudio::SetExtraData(const u8 *data, int size, int wav_bytes_per_packet) {
 #ifdef USE_FFMPEG
 	if (codecCtx_) {
 		codecCtx_->extradata = (uint8_t *)av_mallocz(size);
@@ -177,7 +177,7 @@ bool SimpleAudio::IsOK() const {
 #endif
 }
 
-bool SimpleAudio::Decode(void *inbuf, int inbytes, uint8_t *outbuf, int *outbytes) {
+bool SimpleAudio::Decode(const uint8_t *inbuf, int inbytes, uint8_t *outbuf, int *outbytes) {
 #ifdef USE_FFMPEG
 	if (!codecOpen_) {
 		OpenCodec(inbytes);
@@ -185,7 +185,7 @@ bool SimpleAudio::Decode(void *inbuf, int inbytes, uint8_t *outbuf, int *outbyte
 
 	AVPacket packet;
 	av_init_packet(&packet);
-	packet.data = static_cast<uint8_t *>(inbuf);
+	packet.data = (uint8_t *)(inbuf);
 	packet.size = inbytes;
 
 	int got_frame = 0;
@@ -252,7 +252,10 @@ bool SimpleAudio::Decode(void *inbuf, int inbytes, uint8_t *outbuf, int *outbyte
 		}
 
 		// convert audio to AV_SAMPLE_FMT_S16
-		int swrRet = swr_convert(swrCtx_, &outbuf, frame_->nb_samples, (const u8 **)frame_->extended_data, frame_->nb_samples);
+		int swrRet = 0;
+		if (outbuf != nullptr) {
+			swrRet = swr_convert(swrCtx_, &outbuf, frame_->nb_samples, (const u8 **)frame_->extended_data, frame_->nb_samples);
+		}
 		if (swrRet < 0) {
 			ERROR_LOG(ME, "swr_convert: Error while converting: %d", swrRet);
 			return false;
@@ -313,27 +316,14 @@ bool IsValidCodec(int codec){
 // sceAu module starts from here
 
 AuCtx::AuCtx() {
-	decoder = NULL;
-	startPos = 0;
-	endPos = 0;
-	LoopNum = -1;
-	AuBuf = 0;
-	AuBufSize = 2048;
-	PCMBuf = 0;
-	PCMBufSize = 2048;
-	AuBufAvailable = 0;
-	SumDecodedSamples = 0;
-	askedReadSize = 0;
-	audioType = 0;
-	FrameNum = 0;
-};
+}
 
-AuCtx::~AuCtx(){
-	if (decoder){
+AuCtx::~AuCtx() {
+	if (decoder) {
 		AudioClose(&decoder);
-		decoder = NULL;
+		decoder = nullptr;
 	}
-};
+}
 
 size_t AuCtx::FindNextMp3Sync() {
 	if (audioType != PSP_CODEC_MP3) {
@@ -350,12 +340,12 @@ size_t AuCtx::FindNextMp3Sync() {
 
 // return output pcm size, <0 error
 u32 AuCtx::AuDecode(u32 pcmAddr) {
-	if (!Memory::GetPointer(PCMBuf)) {
-		return hleLogError(ME, -1, "ctx output bufferAddress %08x is invalid", PCMBuf);
-	}
-
-	auto outbuf = Memory::GetPointer(PCMBuf);
+	u32 outptr = PCMBuf + nextOutputHalf * PCMBufSize / 2;
+	auto outbuf = Memory::GetPointerWriteRange(outptr, PCMBufSize / 2);
 	int outpcmbufsize = 0;
+
+	if (pcmAddr)
+		Memory::Write_U32(outptr, pcmAddr);
 
 	// Decode a single frame in sourcebuff and output into PCMBuf.
 	if (!sourcebuff.empty()) {
@@ -391,16 +381,20 @@ u32 AuCtx::AuDecode(u32 pcmAddr) {
 	}
 
 	if (outpcmbufsize == 0 && !end) {
-		outpcmbufsize = MaxOutputSample * 4;
-		memset(outbuf, 0, PCMBufSize);
+		// If we didn't decode anything, we fill this half of the buffer with zeros.
+		outpcmbufsize = PCMBufSize / 2;
+		if (outbuf != nullptr)
+			memset(outbuf, 0, outpcmbufsize);
 	} else if ((u32)outpcmbufsize < PCMBufSize) {
-		// TODO: We probably should use a rolling buffer instead.
-		memset(outbuf + outpcmbufsize, 0, PCMBufSize - outpcmbufsize);
+		// TODO: Not sure it actually zeros this out.
+		if (outbuf != nullptr)
+			memset(outbuf + outpcmbufsize, 0, PCMBufSize / 2 - outpcmbufsize);
 	}
 
-	NotifyMemInfo(MemBlockFlags::WRITE, pcmAddr, outpcmbufsize, "AuDecode");
-	if (pcmAddr)
-		Memory::Write_U32(PCMBuf, pcmAddr);
+	if (outpcmbufsize != 0)
+		NotifyMemInfo(MemBlockFlags::WRITE, outptr, outpcmbufsize, "AuDecode");
+
+	nextOutputHalf ^= 1;
 	return outpcmbufsize;
 }
 
@@ -521,7 +515,7 @@ u32 AuCtx::AuResetPlayPosition() {
 }
 
 void AuCtx::DoState(PointerWrap &p) {
-	auto s = p.Section("AuContext", 0, 1);
+	auto s = p.Section("AuContext", 0, 2);
 	if (!s)
 		return;
 
@@ -545,8 +539,17 @@ void AuCtx::DoState(PointerWrap &p) {
 	Do(p, dummy);
 	Do(p, FrameNum);
 
+	if (s < 2) {
+		AuBufAvailable = 0;
+		Version = 3;
+	} else {
+		Do(p, Version);
+		Do(p, AuBufAvailable);
+		Do(p, sourcebuff);
+		Do(p, nextOutputHalf);
+	}
+
 	if (p.mode == p.MODE_READ) {
 		decoder = new SimpleAudio(audioType);
-		AuBufAvailable = 0; // reset to read from file at position readPos
 	}
 }

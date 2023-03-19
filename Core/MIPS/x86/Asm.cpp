@@ -66,8 +66,8 @@ void ImHere() {
 }
 
 void Jit::GenerateFixedCode(JitOptions &jo) {
+	BeginWrite(GetMemoryProtectPageSize());
 	AlignCodePage();
-	BeginWrite();
 
 	restoreRoundingMode = AlignCode16(); {
 		STMXCSR(MIPSSTATE_VAR(temp));
@@ -181,10 +181,12 @@ void Jit::GenerateFixedCode(JitOptions &jo) {
 #if PPSSPP_ARCH(X86)
 				ADD(32, R(EAX), ImmPtr(GetBasePtr()));
 #elif PPSSPP_ARCH(AMD64)
-				if (jo.reserveR15ForAsm)
+				if (jo.reserveR15ForAsm) {
 					ADD(64, R(RAX), R(JITBASEREG));
-				else
-					ADD(64, R(EAX), Imm32(jitbase));
+				} else {
+					// See above, reserveR15ForAsm is used when above 0x7FFFFFFF.
+					ADD(64, R(EAX), Imm32((u32)jitbase));
+				}
 #endif
 				JMPptr(R(EAX));
 			SetJumpTarget(notfound);

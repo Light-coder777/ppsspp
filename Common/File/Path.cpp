@@ -1,4 +1,6 @@
 #include "ppsspp_config.h"
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 
 #include "Common/File/Path.h"
@@ -216,14 +218,17 @@ std::string Path::GetDirectory() const {
 	return path_;
 }
 
-bool Path::FilePathContains(const std::string &needle) const {
+bool Path::FilePathContainsNoCase(const std::string &needle) const {
 	std::string haystack;
 	if (type_ == PathType::CONTENT_URI) {
 		haystack = AndroidContentURI(path_).FilePath();
 	} else {
 		haystack = path_;
 	}
-	return haystack.find(needle) != std::string::npos;
+
+	auto pred = [](char ch1, char ch2) { return std::toupper(ch1) == std::toupper(ch2); };
+	auto found = std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(), pred);
+	return found != haystack.end();
 }
 
 bool Path::StartsWith(const Path &other) const {
@@ -253,15 +258,20 @@ std::wstring Path::ToWString() const {
 std::string Path::ToVisualString() const {
 	if (type_ == PathType::CONTENT_URI) {
 		return AndroidContentURI(path_).ToVisualString();
+#if PPSSPP_PLATFORM(WINDOWS)
+	} else if (type_ == PathType::NATIVE) {
+		return ReplaceAll(path_, "/", "\\");
+#endif
+	} else {
+		return path_;
 	}
-	return path_;
 }
 
 bool Path::CanNavigateUp() const {
 	if (type_ == PathType::CONTENT_URI) {
 		return AndroidContentURI(path_).CanNavigateUp();
 	}
-	if (path_ == "/" || path_ == "") {
+	if (path_ == "/" || path_.empty()) {
 		return false;
 	}
 	if (type_ == PathType::HTTP) {
@@ -302,6 +312,17 @@ Path Path::GetRootVolume() const {
 		std::string path = path_.substr(0, 2);
 		return Path(path);
 	}
+	// Support UNC and device paths.
+	if (path_[0] == '/' && path_[1] == '/') {
+		size_t next = 2;
+		if ((path_[2] == '.' || path_[2] == '?') && path_[3] == '/') {
+			// Device path, or "\\.\UNC" path, skip the dot and consider the device the root.
+			next = 4;
+		}
+
+		size_t len = path_.find_first_of('/', next);
+		return Path(path_.substr(0, len));
+	}
 #endif
 	return Path("/");
 }
@@ -325,6 +346,11 @@ bool Path::IsAbsolute() const {
 }
 
 bool Path::ComputePathTo(const Path &other, std::string &path) const {
+	if (other == *this) {
+		path.clear();
+		return true;
+	}
+
 	if (!other.StartsWith(*this)) {
 		// Can't do this. Should return an error.
 		return false;
@@ -336,7 +362,6 @@ bool Path::ComputePathTo(const Path &other, std::string &path) const {
 		return true;
 	}
 
-	std::string diff;
 	if (type_ == PathType::CONTENT_URI) {
 		AndroidContentURI a(path_);
 		AndroidContentURI b(other.path_);

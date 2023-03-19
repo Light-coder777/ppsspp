@@ -61,6 +61,13 @@ static bool ParseLineKey(const std::string &line, size_t &pos, std::string *keyO
 static bool ParseLineValue(const std::string &line, size_t &pos, std::string *valueOut) {
 	std::string value = "";
 
+	std::string strippedLine = StripSpaces(line.substr(pos));
+	if (strippedLine[0] == '"' && strippedLine[strippedLine.size()-1] == '"') {
+		// Don't remove comment if is surrounded by " "
+		value += line.substr(pos);
+		pos = line.npos; // Won't enter the while below
+	}
+
 	while (pos < line.size()) {
 		size_t next = line.find('#', pos);
 		if (next == line.npos) {
@@ -117,6 +124,7 @@ static bool ParseLine(const std::string& line, std::string* keyOut, std::string*
 	// 3. A \# in a line is not part of a comment and becomes # in the value.
 	// 4. Whitespace around values is removed.
 	// 5. Double quotes around values is removed.
+	// 6. Value surrounded by double quotes don't parsed to strip comment.
 
 	if (line.size() < 2 || line[0] == ';')
 		return false;
@@ -166,6 +174,19 @@ std::string* Section::GetLine(const char* key, std::string* valueOut, std::strin
 	return 0;
 }
 
+const std::string* Section::GetLine(const char* key, std::string* valueOut, std::string* commentOut) const
+{
+	for (std::vector<std::string>::const_iterator iter = lines.begin(); iter != lines.end(); ++iter)
+	{
+		const std::string& line = *iter;
+		std::string lineKey;
+		ParseLine(line, &lineKey, valueOut, commentOut);
+		if (!strcasecmp(lineKey.c_str(), key))
+			return &line;
+	}
+	return 0;
+}
+
 void Section::Set(const char* key, uint32_t newValue) {
 	Set(key, StringFromFormat("0x%08x", newValue).c_str());
 }
@@ -198,7 +219,7 @@ void Section::Set(const char* key, const char* newValue)
 	else
 	{
 		// The key did not already exist in this section - let's add it.
-		lines.push_back(std::string(key) + " = " + EscapeComments(newValue));
+		lines.emplace_back(std::string(key) + " = " + EscapeComments(newValue));
 	}
 }
 
@@ -210,7 +231,7 @@ void Section::Set(const char* key, const std::string& newValue, const std::strin
 		Delete(key);
 }
 
-bool Section::Get(const char* key, std::string* value, const char* defaultValue)
+bool Section::Get(const char* key, std::string* value, const char* defaultValue) const
 {
 	const std::string* line = GetLine(key, value, 0);
 	if (!line)
@@ -264,10 +285,10 @@ void Section::Set(const char* key, const std::vector<std::string>& newValues)
 }
 
 void Section::AddComment(const std::string &comment) {
-	lines.push_back("# " + comment);
+	lines.emplace_back("# " + comment);
 }
 
-bool Section::Get(const char* key, std::vector<std::string>& values) 
+bool Section::Get(const char* key, std::vector<std::string>& values) const
 {
 	std::string temp;
 	bool retval = Get(key, &temp, 0);
@@ -295,7 +316,7 @@ bool Section::Get(const char* key, std::vector<std::string>& values)
 	return true;
 }
 
-bool Section::Get(const char* key, int* value, int defaultValue)
+bool Section::Get(const char* key, int* value, int defaultValue) const
 {
 	std::string temp;
 	bool retval = Get(key, &temp, 0);
@@ -305,7 +326,7 @@ bool Section::Get(const char* key, int* value, int defaultValue)
 	return false;
 }
 
-bool Section::Get(const char* key, uint32_t* value, uint32_t defaultValue)
+bool Section::Get(const char* key, uint32_t* value, uint32_t defaultValue) const
 {
 	std::string temp;
 	bool retval = Get(key, &temp, 0);
@@ -315,7 +336,7 @@ bool Section::Get(const char* key, uint32_t* value, uint32_t defaultValue)
 	return false;
 }
 
-bool Section::Get(const char* key, uint64_t* value, uint64_t defaultValue)
+bool Section::Get(const char* key, uint64_t* value, uint64_t defaultValue) const
 {
 	std::string temp;
 	bool retval = Get(key, &temp, 0);
@@ -325,7 +346,7 @@ bool Section::Get(const char* key, uint64_t* value, uint64_t defaultValue)
 	return false;
 }
 
-bool Section::Get(const char* key, bool* value, bool defaultValue)
+bool Section::Get(const char* key, bool* value, bool defaultValue) const
 {
 	std::string temp;
 	bool retval = Get(key, &temp, 0);
@@ -335,7 +356,7 @@ bool Section::Get(const char* key, bool* value, bool defaultValue)
 	return false;
 }
 
-bool Section::Get(const char* key, float* value, float defaultValue)
+bool Section::Get(const char* key, float* value, float defaultValue) const
 {
 	std::string temp;
 	bool retval = Get(key, &temp, 0);
@@ -345,7 +366,7 @@ bool Section::Get(const char* key, float* value, float defaultValue)
 	return false;
 }
 
-bool Section::Get(const char* key, double* value, double defaultValue)
+bool Section::Get(const char* key, double* value, double defaultValue) const
 {
 	std::string temp;
 	bool retval = Get(key, &temp, 0);
@@ -546,9 +567,9 @@ bool IniFile::Load(const Path &path)
 	return success;
 }
 
-bool IniFile::LoadFromVFS(const std::string &filename) {
+bool IniFile::LoadFromVFS(VFSInterface &vfs, const std::string &filename) {
 	size_t size;
-	uint8_t *data = VFSReadFile(filename.c_str(), &size);
+	uint8_t *data = vfs.ReadFile(filename.c_str(), &size);
 	if (!data)
 		return false;
 	std::string str((const char*)data, size);
@@ -561,10 +582,10 @@ bool IniFile::LoadFromVFS(const std::string &filename) {
 bool IniFile::Load(std::istream &in) {
 	// Maximum number of letters in a line
 	static const int MAX_BYTES = 1024*32;
+	char *templine = new char[MAX_BYTES];  // avoid using up massive stack space
 
 	while (!(in.eof() || in.fail()))
 	{
-		char templine[MAX_BYTES];
 		in.getline(templine, MAX_BYTES);
 		std::string line = templine;
 
@@ -603,6 +624,7 @@ bool IniFile::Load(std::istream &in) {
 		}
 	}
 
+	delete[] templine;
 	return true;
 }
 

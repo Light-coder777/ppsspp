@@ -41,8 +41,13 @@ protected:
 	void OnDoubleClick(int row, int column) override;
 	void OnRightClick(int row, int column, const POINT& point) override;
 
+	bool ListenRowPrePaint() override { return true; }
+	bool OnRowPrePaint(int row, LPNMLVCUSTOMDRAW msg) override;
+
 private:
+	bool RowValuesChanged(int row);
 	void SetCmdValue(u32 op);
+	void PromptBreakpointCond(const TabStateRow &info);
 
 	const TabStateRow *rows_;
 	int rowCount_;
@@ -53,12 +58,12 @@ public:
 	TabStateValues(const TabStateRow *rows, int rowCount, LPCSTR dialogID, HINSTANCE _hInstance, HWND _hParent);
 	~TabStateValues();
 
-	virtual void Update() {
+	void Update() override {
 		values->Update();
 	}
 
 protected:
-	BOOL DlgProc(UINT message, WPARAM wParam, LPARAM lParam);
+	BOOL DlgProc(UINT message, WPARAM wParam, LPARAM lParam) override;
 
 	CtrlStateValues *values;
 

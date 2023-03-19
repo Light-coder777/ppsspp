@@ -20,6 +20,8 @@
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/StringUtils.h"
+#include "Core/Config.h"
+#include "Core/System.h"
 #include "Core/CoreTiming.h"
 #include "Core/Dialog/PSPDialog.h"
 #include "Core/HLE/sceCtrl.h"
@@ -35,6 +37,27 @@ PSPDialog::PSPDialog(UtilityDialogType type) : dialogType_(type) {
 }
 
 PSPDialog::~PSPDialog() {
+}
+
+void PSPDialog::InitCommon() {
+	UpdateCommon();
+
+	if (GetCommonParam() && GetCommonParam()->language != g_Config.iLanguage) {
+		WARN_LOG(SCEUTILITY, "Game requested language %d, ignoring and using user language", GetCommonParam()->language);
+	}
+}
+
+void PSPDialog::UpdateCommon() {
+	okButtonImg = ImageID("I_CIRCLE");
+	cancelButtonImg = ImageID("I_CROSS");
+	okButtonFlag = CTRL_CIRCLE;
+	cancelButtonFlag = CTRL_CROSS;
+	if (GetCommonParam() && GetCommonParam()->buttonSwap == 1) {
+		okButtonImg = ImageID("I_CROSS");
+		cancelButtonImg = ImageID("I_CIRCLE");
+		okButtonFlag = CTRL_CROSS;
+		cancelButtonFlag = CTRL_CIRCLE;
+	}
 }
 
 PSPDialog::DialogStatus PSPDialog::GetStatus() {
@@ -304,4 +327,18 @@ void PSPDialog::DisplayButtons(int flags, const char *caption)
 		PPGeDrawImage(cancelButtonImg, x1, 256, 11.5f, 11.5f, textStyle);
 		PPGeDrawText(text, x1 + 14.5f, 252, textStyle);
 	}
+}
+
+int PSPDialog::GetConfirmButton() {
+	if (PSP_CoreParameter().compat.flags().ForceCircleButtonConfirm) {
+		return CTRL_CIRCLE;
+	}
+	return g_Config.iButtonPreference == PSP_SYSTEMPARAM_BUTTON_CROSS ? CTRL_CROSS : CTRL_CIRCLE;
+}
+
+int PSPDialog::GetCancelButton() {
+	if (PSP_CoreParameter().compat.flags().ForceCircleButtonConfirm) {
+		return CTRL_CROSS;
+	}
+	return g_Config.iButtonPreference == PSP_SYSTEMPARAM_BUTTON_CROSS ? CTRL_CIRCLE : CTRL_CROSS;
 }

@@ -20,8 +20,10 @@
 #include <mutex>
 
 #include "ext/disarm.h"
+#include "ext/riscv-disas.h"
 #include "ext/udis86/udis86.h"
 
+#include "Common/LogReporting.h"
 #include "Common/StringUtils.h"
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
@@ -29,9 +31,11 @@
 #include "Core/Util/DisArm64.h"
 #include "Core/Config.h"
 
+#include "Core/MIPS/IR/IRJit.h"
 #include "Core/MIPS/JitCommon/JitCommon.h"
 #include "Core/MIPS/JitCommon/JitState.h"
-#include "Core/MIPS/IR/IRJit.h"
+#include "Core/MIPS/MIPSCodeUtils.h"
+#include "Core/MIPS/MIPSTables.h"
 
 #if PPSSPP_ARCH(ARM)
 #include "../ARM/ArmJit.h"
@@ -66,6 +70,32 @@ namespace MIPSComp {
 			Do(p, dummy);
 		}
 	}
+
+	BranchInfo::BranchInfo(u32 pc, MIPSOpcode o, MIPSOpcode delayO, bool al, bool l)
+		: compilerPC(pc), op(o), delaySlotOp(delayO), likely(l), andLink(al) {
+		delaySlotInfo = MIPSGetInfo(delaySlotOp).value;
+		delaySlotIsBranch = (delaySlotInfo & (IS_JUMP | IS_CONDBRANCH)) != 0;
+	}
+
+	u32 ResolveNotTakenTarget(const BranchInfo &branchInfo) {
+		u32 notTakenTarget = branchInfo.compilerPC + 8;
+		if ((branchInfo.delaySlotInfo & (IS_JUMP | IS_CONDBRANCH)) != 0) {
+			// If a branch has a j/jr/jal/jalr as a delay slot, that is run if the branch is not taken.
+			// TODO: Technically, in the likely case, we should somehow suppress andLink on this exit.
+			bool isJump = (branchInfo.delaySlotInfo & IS_JUMP) != 0;
+			// If the delay slot is a branch, likely skips it.
+			if (isJump || !branchInfo.likely)
+				notTakenTarget -= 4;
+
+			// For a branch (not a jump), it actually should try the delay slot and take its target potentially.
+			// This is similar to the VFPU case and has not been seen, so just report it.
+			if (!isJump && SignExtend16ToU32(branchInfo.delaySlotOp) != SignExtend16ToU32(branchInfo.op) - 1)
+				ERROR_LOG_REPORT(JIT, "Branch in branch delay slot at %08x with different target", branchInfo.compilerPC);
+			if (isJump && branchInfo.likely && (branchInfo.delaySlotInfo & (OUT_RA | OUT_RD)) != 0)
+				ERROR_LOG_REPORT(JIT, "Jump in likely branch delay slot with link at %08x", branchInfo.compilerPC);
+	}
+		return notTakenTarget;
+}
 
 	JitInterface *CreateNativeJit(MIPSState *mipsState) {
 #if PPSSPP_ARCH(ARM)
@@ -276,4 +306,41 @@ std::vector<std::string> DisassembleX86(const u8 *data, int size) {
 	return lines;
 }
 
+#endif
+
+#if PPSSPP_ARCH(RISCV64) || defined(DISASM_ALL)
+std::vector<std::string> DisassembleRV64(const u8 *data, int size) {
+	std::vector<std::string> lines;
+
+	int invalid_count = 0;
+	auto invalid_flush = [&]() {
+		if (invalid_count != 0) {
+			lines.push_back(StringFromFormat("(%d invalid bytes)", invalid_count));
+			invalid_count = 0;
+		}
+	};
+
+	char temp[512];
+	rv_inst inst;
+	size_t len;
+	for (int i = 0; i < size; ) {
+		riscv_inst_fetch(data + i, &inst, &len);
+		if (len == 0) {
+			// Force align in case we're somehow unaligned.
+			len = 2 - ((uintptr_t)data & 1);
+			invalid_count += (int)len;
+			i +=(int) len;
+			continue;
+		}
+
+		invalid_flush();
+		riscv_disasm_inst(temp, sizeof(temp), rv64, i * 4, inst);
+		lines.push_back(ReplaceAll(temp, "\t", "  "));
+
+		i += (int)len;
+	}
+
+	invalid_flush();
+	return lines;
+}
 #endif

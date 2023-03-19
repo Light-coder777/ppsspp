@@ -26,7 +26,7 @@
 #include "Common/Thread/Event.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Common/File/Path.h"
-#include "UI/TextureUtil.h"
+#include "Common/Render/ManagedTexture.h"
 
 namespace Draw {
 	class DrawContext;
@@ -86,6 +86,10 @@ public:
 	bool Delete();  // Better be sure what you're doing when calling this.
 	bool DeleteAllSaveData();
 	bool LoadFromPath(const Path &gamePath);
+
+	bool HasFileLoader() const {
+		return fileLoader.get() != nullptr;
+	}
 
 	std::shared_ptr<FileLoader> GetFileLoader();
 	void DisposeFileLoader();

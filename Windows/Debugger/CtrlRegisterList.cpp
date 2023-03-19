@@ -5,16 +5,17 @@
 
 #include "Common/System/Display.h"
 #include "Common/Data/Encoding/Utf8.h"
-#include "Windows/resource.h"
+#include "Core/Config.h"
 #include "Core/MemMap.h"
+#include "Core/Reporting.h"
 #include "Windows/W32Util/ContextMenu.h"
 #include "Windows/W32Util/Misc.h"
 #include "Windows/InputBox.h"
+#include "Windows/resource.h"
 
 #include "CtrlRegisterList.h"
 #include "Debugger_MemoryDlg.h"
 
-#include "Core/Config.h"
 #include "Debugger_Disasm.h"
 #include "DebuggerShared.h"
 
@@ -23,6 +24,9 @@
 enum { REGISTER_PC = 32, REGISTER_HI, REGISTER_LO, REGISTERS_END };
 
 TCHAR CtrlRegisterList::szClassName[] = _T("CtrlRegisterList");
+
+static constexpr UINT_PTR IDT_REDRAW = 0xC0DE0001;
+static constexpr UINT REDRAW_DELAY = 1000 / 60;
 
 void CtrlRegisterList::init()
 {
@@ -103,6 +107,16 @@ LRESULT CALLBACK CtrlRegisterList::wndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 		break;
 	case WM_GETDLGCODE:	// want chars so that we can return 0 on key press and supress the beeping sound
 		return DLGC_WANTARROWS|DLGC_WANTCHARS;
+
+	case WM_TIMER:
+		if (wParam == IDT_REDRAW) {
+			InvalidateRect(hwnd, nullptr, FALSE);
+			UpdateWindow(hwnd);
+			ccp->redrawScheduled_ = false;
+			KillTimer(hwnd, wParam);
+		}
+		break;
+
 	default:
 		break;
 	}
@@ -119,7 +133,7 @@ CtrlRegisterList::CtrlRegisterList(HWND _wnd)
 	: wnd(_wnd) {
 	SetWindowLongPtr(wnd, GWLP_USERDATA, (LONG_PTR)this);
 
-	const float fontScale = 1.0f / g_dpi_scale_real_y;
+	const float fontScale = 1.0f / g_display.dpi_scale_real_y;
 	rowHeight = g_Config.iFontHeight * fontScale;
 	int charWidth = g_Config.iFontWidth * fontScale;
 	font = CreateFont(rowHeight, charWidth, 0, 0,
@@ -342,10 +356,11 @@ void CtrlRegisterList::onKeyDown(WPARAM wParam, LPARAM lParam)
 }
 
 
-void CtrlRegisterList::redraw()
-{
-	InvalidateRect(wnd, NULL, FALSE);
-	UpdateWindow(wnd); 
+void CtrlRegisterList::redraw() {
+	if (!redrawScheduled_) {
+		SetTimer(wnd, IDT_REDRAW, REDRAW_DELAY, nullptr);
+		redrawScheduled_ = true;
+	}
 }
 
 u32 CtrlRegisterList::getSelectedRegValue(char *out, size_t size)
@@ -429,6 +444,7 @@ void CtrlRegisterList::editRegisterValue()
 				cpu->SetRegValue(category, reg, val);
 				break;
 			}
+			Reporting::NotifyDebugger();
 			redraw();
 			SendMessage(GetParent(wnd),WM_DEB_UPDATE,0,0);	// registers changed -> disassembly needs to be updated
 		}

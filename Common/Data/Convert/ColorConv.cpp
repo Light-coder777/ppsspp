@@ -18,126 +18,21 @@
 #include "ppsspp_config.h"
 #include "Common/Data/Convert/ColorConv.h"
 #include "Common/Data/Convert/SmallDataConvert.h"
-// NEON is in a separate file so that it can be compiled with a runtime check.
-#include "Common/Data/Convert/ColorConvNEON.h"
 #include "Common/Common.h"
 #include "Common/CPUDetect.h"
 
 #ifdef _M_SSE
 #include <emmintrin.h>
-#endif
-
-#if _M_SSE >= 0x401
 #include <smmintrin.h>
 #endif
 
-inline u16 RGBA8888toRGB565(u32 px) {
-	return ((px >> 3) & 0x001F) | ((px >> 5) & 0x07E0) | ((px >> 8) & 0xF800);
-}
-
-inline u16 RGBA8888toRGBA4444(u32 px) {
-	return ((px >> 4) & 0x000F) | ((px >> 8) & 0x00F0) | ((px >> 12) & 0x0F00) | ((px >> 16) & 0xF000);
-}
-
-inline u16 BGRA8888toRGB565(u32 px) {
-	return ((px >> 19) & 0x001F) | ((px >> 5) & 0x07E0) | ((px << 8) & 0xF800);
-}
-
-inline u16 BGRA8888toRGBA4444(u32 px) {
-	return ((px >> 20) & 0x000F) | ((px >> 8) & 0x00F0) | ((px << 4) & 0x0F00) | ((px >> 16) & 0xF000);
-}
-
-inline u16 BGRA8888toRGBA5551(u32 px) {
-	return ((px >> 19) & 0x001F) | ((px >> 6) & 0x03E0) | ((px << 7) & 0x7C00) | ((px >> 16) & 0x8000);
-}
-
-inline u16 RGBA8888toRGBA5551(u32 px) {
-	return ((px >> 3) & 0x001F) | ((px >> 6) & 0x03E0) | ((px >> 9) & 0x7C00) | ((px >> 16) & 0x8000);
-}
-
-// convert 4444 image to 8888, parallelizable
-void convert4444_gl(u16* data, u32* out, int width, int l, int u) {
-	for (int y = l; y < u; ++y) {
-		for (int x = 0; x < width; ++x) {
-			u32 val = data[y*width + x];
-			u32 r = ((val >> 12) & 0xF) * 17;
-			u32 g = ((val >> 8) & 0xF) * 17;
-			u32 b = ((val >> 4) & 0xF) * 17;
-			u32 a = ((val >> 0) & 0xF) * 17;
-			out[y*width + x] = (a << 24) | (b << 16) | (g << 8) | r;
-		}
-	}
-}
-
-// convert 565 image to 8888, parallelizable
-void convert565_gl(u16* data, u32* out, int width, int l, int u) {
-	for (int y = l; y < u; ++y) {
-		for (int x = 0; x < width; ++x) {
-			u32 val = data[y*width + x];
-			u32 r = Convert5To8((val >> 11) & 0x1F);
-			u32 g = Convert6To8((val >> 5) & 0x3F);
-			u32 b = Convert5To8((val)& 0x1F);
-			out[y*width + x] = (0xFF << 24) | (b << 16) | (g << 8) | r;
-		}
-	}
-}
-
-// convert 5551 image to 8888, parallelizable
-void convert5551_gl(u16* data, u32* out, int width, int l, int u) {
-	for (int y = l; y < u; ++y) {
-		for (int x = 0; x < width; ++x) {
-			u32 val = data[y*width + x];
-			u32 r = Convert5To8((val >> 11) & 0x1F);
-			u32 g = Convert5To8((val >> 6) & 0x1F);
-			u32 b = Convert5To8((val >> 1) & 0x1F);
-			u32 a = (val & 0x1) * 255;
-			out[y*width + x] = (a << 24) | (b << 16) | (g << 8) | r;
-		}
-	}
-}
-
-// convert 4444 image to 8888, parallelizable
-void convert4444_dx9(u16* data, u32* out, int width, int l, int u) {
-	for (int y = l; y < u; ++y) {
-		for (int x = 0; x < width; ++x) {
-			u32 val = data[y*width + x];
-			u32 r = ((val >> 0) & 0xF) * 17;
-			u32 g = ((val >> 4) & 0xF) * 17;
-			u32 b = ((val >> 8) & 0xF) * 17;
-			u32 a = ((val >> 12) & 0xF) * 17;
-			out[y*width + x] = (a << 24) | (b << 16) | (g << 8) | r;
-		}
-	}
-}
-
-// convert 565 image to 8888, parallelizable
-void convert565_dx9(u16* data, u32* out, int width, int l, int u) {
-	for (int y = l; y < u; ++y) {
-		for (int x = 0; x < width; ++x) {
-			u32 val = data[y*width + x];
-			u32 r = Convert5To8((val)& 0x1F);
-			u32 g = Convert6To8((val >> 5) & 0x3F);
-			u32 b = Convert5To8((val >> 11) & 0x1F);
-			out[y*width + x] = (0xFF << 24) | (b << 16) | (g << 8) | r;
-		}
-	}
-}
-
-// convert 5551 image to 8888, parallelizable
-void convert5551_dx9(u16* data, u32* out, int width, int l, int u) {
-	for (int y = l; y < u; ++y) {
-		for (int x = 0; x < width; ++x) {
-			u32 val = data[y*width + x];
-			u32 r = Convert5To8((val >> 0) & 0x1F);
-			u32 g = Convert5To8((val >> 5) & 0x1F);
-			u32 b = Convert5To8((val >> 10) & 0x1F);
-			u32 a = ((val >> 15) & 0x1) * 255;
-			out[y*width + x] = (a << 24) | (b << 16) | (g << 8) | r;
-		}
-	}
-}
-
-
+#if PPSSPP_ARCH(ARM_NEON)
+#if defined(_MSC_VER) && PPSSPP_ARCH(ARM64)
+#include <arm64_neon.h>
+#else
+#include <arm_neon.h>
+#endif
+#endif
 
 void ConvertBGRA8888ToRGBA8888(u32 *dst, const u32 *src, u32 numPixels) {
 #ifdef _M_SSE
@@ -181,19 +76,15 @@ void ConvertBGRA8888ToRGB888(u8 *dst, const u32 *src, u32 numPixels) {
 	}
 }
 
-void ConvertRGBA8888ToRGBA5551(u16 *dst, const u32 *src, u32 numPixels) {
-#if _M_SSE >= 0x401
+#if defined(_M_SSE)
+#if defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
+[[gnu::target("sse4.1")]]
+#endif
+static inline void ConvertRGBA8888ToRGBA5551_SSE4(__m128i *dstp, const __m128i *srcp, u32 sseChunks) {
 	const __m128i maskAG = _mm_set1_epi32(0x8000F800);
 	const __m128i maskRB = _mm_set1_epi32(0x00F800F8);
 	const __m128i mask = _mm_set1_epi32(0x0000FFFF);
 
-	const __m128i *srcp = (const __m128i *)src;
-	__m128i *dstp = (__m128i *)dst;
-	u32 sseChunks = (numPixels / 4) & ~1;
-	// SSE 4.1 required for _mm_packus_epi32.
-	if (((intptr_t)src & 0xF) || ((intptr_t)dst & 0xF) || !cpu_info.bSSE4_1) {
-		sseChunks = 0;
-	}
 	for (u32 i = 0; i < sseChunks; i += 2) {
 		__m128i c1 = _mm_load_si128(&srcp[i + 0]);
 		__m128i c2 = _mm_load_si128(&srcp[i + 1]);
@@ -213,6 +104,21 @@ void ConvertRGBA8888ToRGBA5551(u16 *dst, const u32 *src, u32 numPixels) {
 
 		_mm_store_si128(&dstp[i / 2], _mm_packus_epi32(c1, c2));
 	}
+}
+#endif
+
+void ConvertRGBA8888ToRGBA5551(u16 *dst, const u32 *src, u32 numPixels) {
+#if defined(_M_SSE)
+	const __m128i *srcp = (const __m128i *)src;
+	__m128i *dstp = (__m128i *)dst;
+	u32 sseChunks = (numPixels / 4) & ~1;
+	// SSE 4.1 required for _mm_packus_epi32.
+	if (((intptr_t)src & 0xF) || ((intptr_t)dst & 0xF) || !cpu_info.bSSE4_1) {
+		sseChunks = 0;
+	} else {
+		ConvertRGBA8888ToRGBA5551_SSE4(dstp, srcp, sseChunks);
+	}
+
 	// The remainder starts right after those done via SSE.
 	u32 i = sseChunks * 4;
 #else
@@ -223,19 +129,15 @@ void ConvertRGBA8888ToRGBA5551(u16 *dst, const u32 *src, u32 numPixels) {
 	}
 }
 
-void ConvertBGRA8888ToRGBA5551(u16 *dst, const u32 *src, u32 numPixels) {
-#if _M_SSE >= 0x401
+#if defined(_M_SSE)
+#if defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
+[[gnu::target("sse4.1")]]
+#endif
+static inline void ConvertBGRA8888ToRGBA5551_SSE4(__m128i *dstp, const __m128i *srcp, u32 sseChunks) {
 	const __m128i maskAG = _mm_set1_epi32(0x8000F800);
 	const __m128i maskRB = _mm_set1_epi32(0x00F800F8);
 	const __m128i mask = _mm_set1_epi32(0x0000FFFF);
 
-	const __m128i *srcp = (const __m128i *)src;
-	__m128i *dstp = (__m128i *)dst;
-	u32 sseChunks = (numPixels / 4) & ~1;
-	// SSE 4.1 required for _mm_packus_epi32.
-	if (((intptr_t)src & 0xF) || ((intptr_t)dst & 0xF) || !cpu_info.bSSE4_1) {
-		sseChunks = 0;
-	}
 	for (u32 i = 0; i < sseChunks; i += 2) {
 		__m128i c1 = _mm_load_si128(&srcp[i + 0]);
 		__m128i c2 = _mm_load_si128(&srcp[i + 1]);
@@ -255,6 +157,21 @@ void ConvertBGRA8888ToRGBA5551(u16 *dst, const u32 *src, u32 numPixels) {
 
 		_mm_store_si128(&dstp[i / 2], _mm_packus_epi32(c1, c2));
 	}
+}
+#endif
+
+void ConvertBGRA8888ToRGBA5551(u16 *dst, const u32 *src, u32 numPixels) {
+#if defined(_M_SSE)
+	const __m128i *srcp = (const __m128i *)src;
+	__m128i *dstp = (__m128i *)dst;
+	u32 sseChunks = (numPixels / 4) & ~1;
+	// SSE 4.1 required for _mm_packus_epi32.
+	if (((intptr_t)src & 0xF) || ((intptr_t)dst & 0xF) || !cpu_info.bSSE4_1) {
+		sseChunks = 0;
+	} else {
+		ConvertBGRA8888ToRGBA5551_SSE4(dstp, srcp, sseChunks);
+	}
+
 	// The remainder starts right after those done via SSE.
 	u32 i = sseChunks * 4;
 #else
@@ -485,8 +402,7 @@ void ConvertABGR4444ToRGBA8888(u32 *dst32, const u16 *src, u32 numPixels) {
 	}
 }
 
-void ConvertRGBA4444ToBGRA8888(u32 *dst32, const u16 *src, u32 numPixels) {
-	u8 *dst = (u8 *)dst32;
+void ConvertRGBA4444ToBGRA8888(u32 *dst, const u16 *src, u32 numPixels) {
 	for (u32 x = 0; x < numPixels; x++) {
 		u16 c = src[x];
 		u32 r = Convert4To8(c & 0x000f);
@@ -522,7 +438,7 @@ void ConvertRGB565ToBGRA8888(u32 *dst, const u16 *src, u32 numPixels) {
 	}
 }
 
-void ConvertRGBA4444ToABGR4444Basic(u16 *dst, const u16 *src, u32 numPixels) {
+void ConvertRGBA4444ToABGR4444(u16 *dst, const u16 *src, u32 numPixels) {
 #ifdef _M_SSE
 	const __m128i mask0040 = _mm_set1_epi16(0x00F0);
 
@@ -542,6 +458,28 @@ void ConvertRGBA4444ToABGR4444Basic(u16 *dst, const u16 *src, u32 numPixels) {
 	}
 	// The remainder is done in chunks of 2, SSE was chunks of 8.
 	u32 i = sseChunks * 8 / 2;
+#elif PPSSPP_ARCH(ARM_NEON)
+	const uint16x8_t mask0040 = vdupq_n_u16(0x00F0);
+
+	if (((uintptr_t)dst & 15) == 0 && ((uintptr_t)src & 15) == 0) {
+		u32 simdable = (numPixels / 8) * 8;
+		for (u32 i = 0; i < simdable; i += 8) {
+			uint16x8_t c = vld1q_u16(src);
+
+			const uint16x8_t a = vshrq_n_u16(c, 12);
+			const uint16x8_t b = vandq_u16(vshrq_n_u16(c, 4), mask0040);
+			const uint16x8_t g = vshlq_n_u16(vandq_u16(c, mask0040), 4);
+			const uint16x8_t r = vshlq_n_u16(c, 12);
+
+			uint16x8_t res = vorrq_u16(vorrq_u16(r, g), vorrq_u16(b, a));
+			vst1q_u16(dst, res);
+
+			src += 8;
+			dst += 8;
+		}
+		numPixels -= simdable;
+	}
+	u32 i = 0;  // already moved the pointers forward
 #else
 	u32 i = 0;
 #endif
@@ -566,7 +504,7 @@ void ConvertRGBA4444ToABGR4444Basic(u16 *dst, const u16 *src, u32 numPixels) {
 	}
 }
 
-void ConvertRGBA5551ToABGR1555Basic(u16 *dst, const u16 *src, u32 numPixels) {
+void ConvertRGBA5551ToABGR1555(u16 *dst, const u16 *src, u32 numPixels) {
 #ifdef _M_SSE
 	const __m128i maskB = _mm_set1_epi16(0x003E);
 	const __m128i maskG = _mm_set1_epi16(0x07C0);
@@ -587,6 +525,29 @@ void ConvertRGBA5551ToABGR1555Basic(u16 *dst, const u16 *src, u32 numPixels) {
 	}
 	// The remainder is done in chunks of 2, SSE was chunks of 8.
 	u32 i = sseChunks * 8 / 2;
+#elif PPSSPP_ARCH(ARM_NEON)
+	const uint16x8_t maskB = vdupq_n_u16(0x003E);
+	const uint16x8_t maskG = vdupq_n_u16(0x07C0);
+
+	if (((uintptr_t)dst & 15) == 0 && ((uintptr_t)src & 15) == 0) {
+		u32 simdable = (numPixels / 8) * 8;
+		for (u32 i = 0; i < simdable; i += 8) {
+			uint16x8_t c = vld1q_u16(src);
+
+			const uint16x8_t a = vshrq_n_u16(c, 15);
+			const uint16x8_t b = vandq_u16(vshrq_n_u16(c, 9), maskB);
+			const uint16x8_t g = vandq_u16(vshlq_n_u16(c, 1), maskG);
+			const uint16x8_t r = vshlq_n_u16(c, 11);
+
+			uint16x8_t res = vorrq_u16(vorrq_u16(r, g), vorrq_u16(b, a));
+			vst1q_u16(dst, res);
+
+			src += 8;
+			dst += 8;
+		}
+		numPixels -= simdable;
+	}
+	u32 i = 0;
 #else
 	u32 i = 0;
 #endif
@@ -611,7 +572,7 @@ void ConvertRGBA5551ToABGR1555Basic(u16 *dst, const u16 *src, u32 numPixels) {
 	}
 }
 
-void ConvertRGB565ToBGR565Basic(u16 *dst, const u16 *src, u32 numPixels) {
+void ConvertRGB565ToBGR565(u16 *dst, const u16 *src, u32 numPixels) {
 #ifdef _M_SSE
 	const __m128i maskG = _mm_set1_epi16(0x07E0);
 
@@ -630,6 +591,28 @@ void ConvertRGB565ToBGR565Basic(u16 *dst, const u16 *src, u32 numPixels) {
 	}
 	// The remainder is done in chunks of 2, SSE was chunks of 8.
 	u32 i = sseChunks * 8 / 2;
+#elif PPSSPP_ARCH(ARM_NEON)
+	const uint16x8_t maskG = vdupq_n_u16(0x07E0);
+
+	if (((uintptr_t)dst & 15) == 0 && ((uintptr_t)src & 15) == 0) {
+		u32 simdable = (numPixels / 8) * 8;
+		for (u32 i = 0; i < simdable; i += 8) {
+			uint16x8_t c = vld1q_u16(src);
+
+			const uint16x8_t b = vshrq_n_u16(c, 11);
+			const uint16x8_t g = vandq_u16(c, maskG);
+			const uint16x8_t r = vshlq_n_u16(c, 11);
+
+			uint16x8_t res = vorrq_u16(vorrq_u16(r, g), b);
+			vst1q_u16(dst, res);
+
+			src += 8;
+			dst += 8;
+		}
+		numPixels -= simdable;
+	}
+
+	u32 i = 0;
 #else
 	u32 i = 0;
 #endif
@@ -665,21 +648,4 @@ void ConvertBGRA5551ToABGR1555(u16 *dst, const u16 *src, u32 numPixels) {
 		const u16 c = src[i];
 		dst[i] = (c >> 15) | (c << 1);
 	}
-}
-
-// Reuse the logic from the header - if these aren't defined, we need externs.
-#ifndef ConvertRGBA4444ToABGR4444
-Convert16bppTo16bppFunc ConvertRGBA4444ToABGR4444 = &ConvertRGBA4444ToABGR4444Basic;
-Convert16bppTo16bppFunc ConvertRGBA5551ToABGR1555 = &ConvertRGBA5551ToABGR1555Basic;
-Convert16bppTo16bppFunc ConvertRGB565ToBGR565 = &ConvertRGB565ToBGR565Basic;
-#endif
-
-void SetupColorConv() {
-#if PPSSPP_ARCH(ARM_NEON) && !PPSSPP_ARCH(ARM64)
-	if (cpu_info.bNEON) {
-		ConvertRGBA4444ToABGR4444 = &ConvertRGBA4444ToABGR4444NEON;
-		ConvertRGBA5551ToABGR1555 = &ConvertRGBA5551ToABGR1555NEON;
-		ConvertRGB565ToBGR565 = &ConvertRGB565ToBGR565NEON;
-	}
-#endif
 }

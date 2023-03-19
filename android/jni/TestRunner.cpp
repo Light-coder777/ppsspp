@@ -107,7 +107,7 @@ bool RunTests() {
 
 	// Never report from tests.
 	std::string savedReportHost = g_Config.sReportHost;
-	g_Config.sReportHost = "";
+	g_Config.sReportHost.clear();
 
 	for (size_t i = 0; i < ARRAY_SIZE(testsToRun); i++) {
 		std::string testName = testsToRun[i];
@@ -116,11 +116,11 @@ bool RunTests() {
 
 		INFO_LOG(SYSTEM, "Preparing to execute '%s'", testName.c_str());
 		std::string error_string;
-		output = "";
+		output.clear();
 		if (!PSP_Init(coreParam, &error_string)) {
 			ERROR_LOG(SYSTEM, "Failed to init unittest %s : %s", testsToRun[i], error_string.c_str());
-			PSP_CoreParameter().pixelWidth = pixel_xres;
-			PSP_CoreParameter().pixelHeight = pixel_yres;
+			PSP_CoreParameter().pixelWidth = g_display.pixel_xres;
+			PSP_CoreParameter().pixelHeight = g_display.pixel_yres;
 			return false;
 		}
 
@@ -129,7 +129,7 @@ bool RunTests() {
 		// Run the emu until the test exits
 		INFO_LOG(SYSTEM, "Test: Entering runloop.");
 		while (true) {
-			int blockTicks = usToCycles(1000000 / 10);
+			int blockTicks = (int)usToCycles(1000000 / 10);
 			while (coreState == CORE_RUNNING) {
 				PSP_RunLoopFor(blockTicks);
 			}
@@ -176,8 +176,8 @@ bool RunTests() {
 		}
 		PSP_Shutdown();
 	}
-	PSP_CoreParameter().pixelWidth = pixel_xres;
-	PSP_CoreParameter().pixelHeight = pixel_yres;
+	PSP_CoreParameter().pixelWidth = g_display.pixel_xres;
+	PSP_CoreParameter().pixelHeight = g_display.pixel_yres;
 	PSP_CoreParameter().headLess = false;
 	PSP_CoreParameter().graphicsContext = tempCtx;
 

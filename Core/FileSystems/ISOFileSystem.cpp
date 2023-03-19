@@ -20,7 +20,6 @@
 #include <ctype.h>
 #include <algorithm>
 
-#include "Common/Common.h"
 #include "Common/CommonTypes.h"
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
@@ -146,9 +145,10 @@ ISOFileSystem::ISOFileSystem(IHandleAllocator *_hAlloc, BlockDevice *_blockDevic
 	hAlloc = _hAlloc;
 
 	VolDescriptor desc;
-	blockDevice->ReadBlock(16, (u8*)&desc);
+	if (!blockDevice->ReadBlock(16, (u8*)&desc))
+		blockDevice->NotifyReadError();
 
-	entireISO.name = "";
+	entireISO.name.clear();
 	entireISO.isDirectory = false;
 	entireISO.startingPosition = 0;
 	entireISO.size = _blockDevice->GetNumBlocks();
@@ -229,6 +229,12 @@ void ISOFileSystem::ReadDirectory(TreeEntry *root) {
 			entry->dirsize = dir.dataLength;
 			entry->valid = isFile;  // Can pre-mark as valid if file, as we don't recurse into those.
 			VERBOSE_LOG(FILESYS, "%s: %s %08x %08x %i", entry->isDirectory ? "D" : "F", entry->name.c_str(), (u32)dir.firstDataSector, entry->startingPosition, entry->startingPosition);
+
+			// Round down to avoid any false reports.
+			if (isFile && dir.firstDataSector + (dir.dataLength / 2048) > blockDevice->GetNumBlocks()) {
+				blockDevice->NotifyReadError();
+				ERROR_LOG(FILESYS, "File '%s' starts or ends outside ISO", entry->name.c_str());
+			}
 
 			if (entry->isDirectory && !relative) {
 				if (entry->startsector == root->startsector) {
@@ -395,13 +401,13 @@ int ISOFileSystem::Ioctl(u32 handle, u32 cmd, u32 indataPtr, u32 inlen, u32 outd
 			return SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED;
 		}
 
-		if (!Memory::IsValidAddress(outdataPtr) || outlen < 0x800) {
-			WARN_LOG_REPORT(FILESYS, "sceIoIoctl: Invalid out pointer while reading ISO9660 volume descriptor");
+		if (!Memory::IsValidRange(outdataPtr, 0x800) || outlen < 0x800) {
+			WARN_LOG_REPORT(FILESYS, "sceIoIoctl: Invalid out pointer %08x while reading ISO9660 volume descriptor", outdataPtr);
 			return SCE_KERNEL_ERROR_ERRNO_INVALID_ARGUMENT;
 		}
 
 		INFO_LOG(SCEIO, "sceIoIoctl: reading ISO9660 volume descriptor read");
-		blockDevice->ReadBlock(16, Memory::GetPointer(outdataPtr));
+		blockDevice->ReadBlock(16, Memory::GetPointerWriteUnchecked(outdataPtr));
 		return 0;
 
 	// Get ISO9660 path table (from open ISO9660 file.)
@@ -418,7 +424,7 @@ int ISOFileSystem::Ioctl(u32 handle, u32 cmd, u32 indataPtr, u32 inlen, u32 outd
 		} else {
 			int block = (u16)desc.firstLETableSector;
 			u32 size = Memory::ValidSize(outdataPtr, (u32)desc.pathTableLength);
-			u8 *out = Memory::GetPointer(outdataPtr);
+			u8 *out = Memory::GetPointerWriteRange(outdataPtr, size);
 
 			int blocks = size / blockDevice->GetBlockSize();
 			blockDevice->ReadBlocks(block, blocks, out);
@@ -625,11 +631,14 @@ PSPFileInfo ISOFileSystem::GetFileInfo(std::string filename) {
 	return x;
 }
 
-std::vector<PSPFileInfo> ISOFileSystem::GetDirListing(std::string path) {
+std::vector<PSPFileInfo> ISOFileSystem::GetDirListing(const std::string &path, bool *exists) {
 	std::vector<PSPFileInfo> myVector;
 	TreeEntry *entry = GetFromPath(path);
-	if (!entry)
+	if (!entry) {
+		if (exists)
+			*exists = false;
 		return myVector;
+	}
 
 	const std::string dot(".");
 	const std::string dotdot("..");
@@ -645,6 +654,7 @@ std::vector<PSPFileInfo> ISOFileSystem::GetDirListing(std::string path) {
 		x.name = e->name;
 		// Strangely, it seems to be executable even for files.
 		x.access = 0555;
+		x.exists = true;
 		x.size = e->size;
 		x.type = e->isDirectory ? FILETYPE_DIRECTORY : FILETYPE_NORMAL;
 		x.isOnSectorSystem = true;
@@ -653,6 +663,8 @@ std::vector<PSPFileInfo> ISOFileSystem::GetDirListing(std::string path) {
 		x.numSectors = (u32)((e->size + sectorSize - 1) / sectorSize);
 		myVector.push_back(x);
 	}
+	if (exists)
+		*exists = true;
 	return myVector;
 }
 

@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 #include <cstdint>
+#include <string>
 
 #include "Common/Math/geom2d.h"
 #include "Common/Math/lin/vec3.h"
@@ -70,11 +71,11 @@ public:
 
 	DrawBuffer *Draw() const { return uidrawbuffer_; }
 	DrawBuffer *DrawTop() const { return uidrawbufferTop_; }
-	const UI::Theme *theme;
 
 	// Utility methods
-
 	TextDrawer *Text() const { return textDrawer_; }
+
+	void SetTintSaturation(float tint, float sat);
 
 	void SetFontStyle(const UI::FontStyle &style);
 	const UI::FontStyle &GetFontStyle() { return *fontStyle_; }
@@ -94,11 +95,23 @@ public:
 	const Bounds &GetBounds() const { return bounds_; }
 	Bounds GetLayoutBounds() const;
 	Draw::DrawContext *GetDrawContext() { return draw_; }
+	const UI::Theme &GetTheme() const {
+		return *theme;
+	}
 	void SetCurZ(float curZ);
 
 	void PushTransform(const UITransform &transform);
 	void PopTransform();
 	Bounds TransformBounds(const Bounds &bounds);
+
+	void setUIAtlas(const std::string &name);
+
+	void SetScreenTag(const char *tag) {
+		screenTag_ = tag;
+	}
+
+	// TODO: Move to private.
+	const UI::Theme *theme;
 
 private:
 	Draw::DrawContext *draw_ = nullptr;
@@ -120,4 +133,9 @@ private:
 
 	std::vector<Bounds> scissorStack_;
 	std::vector<UITransform> transformStack_;
+
+	std::string lastUIAtlas_;
+	std::string UIAtlas_ = "ui_atlas.zim";
+
+	const char *screenTag_ = nullptr;
 };

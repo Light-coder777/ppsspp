@@ -35,7 +35,6 @@
 #include "Core/MIPS/MIPS.h"
 #include "Core/MIPS/MIPSCodeUtils.h"
 #include "Core/HLE/HLETables.h"
-#include "Core/HLE/sceDisplay.h"
 #include "Core/HLE/sceIo.h"
 #include "Core/HLE/sceAudio.h"
 #include "Core/HLE/sceKernelMemory.h"
@@ -364,7 +363,6 @@ bool hleExecuteDebugBreak(const HLEFunction &func)
 	}
 
 	Core_EnableStepping(true, "hle.step", latestSyscallPC);
-	host->SetDebugMode(true);
 	return true;
 }
 
@@ -866,6 +864,8 @@ void hleDoLogInternal(LogTypes::LOG_TYPE t, LogTypes::LOG_LEVELS level, u64 res,
 
 		funcName = latestSyscall->name;
 		funcFlags = latestSyscall->flags;
+	} else {
+		strcpy(formatted_args, "?");
 	}
 
 	const char *fmt;

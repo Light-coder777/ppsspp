@@ -21,7 +21,6 @@
 #include "Common/CPUDetect.h"
 #include "Common/Log.h"
 #include "Core/Config.h"
-#include "Core/Reporting.h"
 #include "Common/Arm64Emitter.h"
 #include "Core/MIPS/JitCommon/JitCommon.h"
 #include "GPU/GPUState.h"
@@ -113,7 +112,7 @@ static const JitLookup jitLookup[] = {
 
 	{&VertexDecoder::Step_PosS8Through, &VertexDecoderJitCache::Jit_PosS8Through},
 	{&VertexDecoder::Step_PosS16Through, &VertexDecoderJitCache::Jit_PosS16Through},
-	{&VertexDecoder::Step_PosFloatThrough, &VertexDecoderJitCache::Jit_PosFloat},
+	{&VertexDecoder::Step_PosFloatThrough, &VertexDecoderJitCache::Jit_PosFloatThrough},
 
 	{&VertexDecoder::Step_PosS8, &VertexDecoderJitCache::Jit_PosS8},
 	{&VertexDecoder::Step_PosS16, &VertexDecoderJitCache::Jit_PosS16},
@@ -143,7 +142,7 @@ static const JitLookup jitLookup[] = {
 JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int32_t *jittedSize) {
 	dec_ = &dec;
 
-	BeginWrite();
+	BeginWrite(4096);
 	const u8 *start = AlignCode16();
 
 	bool prescaleStep = false;
@@ -190,7 +189,7 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 
 	// Add code to convert matrices to 4x4.
 	// Later we might want to do this when the matrices are loaded instead.
-	if (dec.weighttype && g_Config.bSoftwareSkinning) {
+	if (dec.skinInDecode) {
 		// Copying from R3 to R4
 		MOVP2R(X3, gstate.boneMatrix);
 		MOVP2R(X4, bones);
@@ -668,15 +667,11 @@ void VertexDecoderJitCache::Jit_PosFloat() {
 }
 
 void VertexDecoderJitCache::Jit_PosS8Through() {
-	LDRSB(INDEX_UNSIGNED, tempReg1, srcReg, dec_->posoff);
-	LDRSB(INDEX_UNSIGNED, tempReg2, srcReg, dec_->posoff + 1);
-	LDRSB(INDEX_UNSIGNED, tempReg3, srcReg, dec_->posoff + 2);  // signed?
-	fp.SCVTF(fpScratchReg, tempReg1);
-	fp.SCVTF(fpScratchReg2, tempReg2);
-	fp.SCVTF(fpScratchReg3, tempReg3);
+	// 8-bit positions in throughmode always decode to 0, depth included.
+	fp.EOR(fpScratchReg, fpScratchReg, fpScratchReg);
 	STR(INDEX_UNSIGNED, fpScratchReg, dstReg, dec_->decFmt.posoff);
-	STR(INDEX_UNSIGNED, fpScratchReg2, dstReg, dec_->decFmt.posoff + 4);
-	STR(INDEX_UNSIGNED, fpScratchReg3, dstReg, dec_->decFmt.posoff + 8);
+	STR(INDEX_UNSIGNED, fpScratchReg, dstReg, dec_->decFmt.posoff + 4);
+	STR(INDEX_UNSIGNED, fpScratchReg, dstReg, dec_->decFmt.posoff + 8);
 }
 
 void VertexDecoderJitCache::Jit_PosS16Through() {
@@ -689,6 +684,25 @@ void VertexDecoderJitCache::Jit_PosS16Through() {
 	LDRH(INDEX_UNSIGNED, tempReg3, srcReg, dec_->posoff + 4);
 	fp.SCVTF(src[1], tempReg3);
 	STR(INDEX_UNSIGNED, src[1], dstReg, dec_->decFmt.posoff + 8);
+}
+
+void VertexDecoderJitCache::Jit_PosFloatThrough() {
+	// Instead of just copying 12 bytes, we copy 8 and clamp Z.
+	if ((dec_->posoff & 7) == 0 && (dec_->decFmt.posoff & 7) == 0) {
+		LDR(INDEX_UNSIGNED, EncodeRegTo64(tempReg1), srcReg, dec_->posoff);
+		STR(INDEX_UNSIGNED, EncodeRegTo64(tempReg1), dstReg, dec_->decFmt.posoff);
+	} else {
+		LDP(INDEX_SIGNED, tempReg1, tempReg2, srcReg, dec_->posoff);
+		STP(INDEX_SIGNED, tempReg1, tempReg2, dstReg, dec_->decFmt.posoff);
+	}
+
+	fp.LDUR(32, neonScratchRegD, srcReg, dec_->posoff + 8);
+	fp.FCVTZU(32, neonScratchRegD, neonScratchRegD);
+	// Narrow to 16 bit, saturating meanwhile.
+	fp.UQXTN(16, neonScratchRegD, neonScratchRegD);
+	fp.UXTL(16, neonScratchRegD, neonScratchRegD);
+	fp.UCVTF(32, neonScratchRegD, neonScratchRegD);
+	fp.STUR(32, neonScratchRegD, dstReg, dec_->decFmt.posoff + 8);
 }
 
 void VertexDecoderJitCache::Jit_NormalS8() {
@@ -708,7 +722,7 @@ void VertexDecoderJitCache::Jit_NormalS16() {
 
 void VertexDecoderJitCache::Jit_NormalFloat() {
 	// Only need to copy 12 bytes, but copying 16 should be okay (and is faster.)
-	if ((dec_->posoff & 7) == 0 && (dec_->decFmt.posoff & 7) == 0) {
+	if ((dec_->nrmoff & 7) == 0 && (dec_->decFmt.nrmoff & 7) == 0) {
 		LDP(INDEX_SIGNED, EncodeRegTo64(tempReg1), EncodeRegTo64(tempReg2), srcReg, dec_->nrmoff);
 		STP(INDEX_SIGNED, EncodeRegTo64(tempReg1), EncodeRegTo64(tempReg2), dstReg, dec_->decFmt.nrmoff);
 	} else {

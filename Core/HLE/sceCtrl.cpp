@@ -20,18 +20,20 @@
 
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
+#include "Common/Math/math_util.h"
+#include "Core/CoreTiming.h"
 #include "Core/HLE/HLE.h"
 #include "Core/HLE/FunctionWrappers.h"
-#include "Core/MIPS/MIPS.h"
-#include "Core/CoreTiming.h"
-#include "Core/MemMapHelpers.h"
-#include "Core/Replay.h"
-#include "Core/Util/AudioFormat.h"  // for clamp_u8
 #include "Core/HLE/sceCtrl.h"
-#include "Core/HLE/sceDisplay.h"
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceKernelInterrupt.h"
+#include "Core/HW/Display.h"
+#include "Core/System.h"
+#include "Core/MemMapHelpers.h"
+#include "Core/MIPS/MIPS.h"
+#include "Core/Replay.h"
+#include "Core/Util/AudioFormat.h"  // for clamp_u8
 
 /* Index for the two analog directions */
 #define CTRL_ANALOG_X   0
@@ -118,6 +120,20 @@ static void __CtrlUpdateLatch()
 
 	// Copy in the current data to the current buffer.
 	ctrlBufs[ctrlBuf] = ctrlCurrent;
+
+	if (PSP_CoreParameter().compat.flags().DaxterRotatedAnalogStick) {
+		// For some reason, Daxter rotates the analog input. See #17015
+		float angle = (15.0f / 360.0f) * (2.0f * M_PI);
+		float cosAngle = cosf(angle);
+		float sinAngle = sinf(angle);
+		float x = ctrlBufs[ctrlBuf].analog[0][0] - 128;
+		float y = ctrlBufs[ctrlBuf].analog[0][1] - 128;
+		float rX = x * cosAngle - y * sinAngle;
+		float rY = x * sinAngle + y * cosAngle;
+		ctrlBufs[ctrlBuf].analog[0][0] = (u8)Clamp(rX + 128, 0.0f, 255.0f);
+		ctrlBufs[ctrlBuf].analog[0][1] = (u8)Clamp(rY + 128, 0.0f, 255.0f);
+	}
+
 	ctrlBufs[ctrlBuf].buttons = buttons;
 
 	u32 changed = buttons ^ ctrlOldButtons;

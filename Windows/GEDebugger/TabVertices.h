@@ -35,9 +35,9 @@ public:
 	}
 
 protected:
-	virtual bool WindowMessage(UINT msg, WPARAM wParam, LPARAM lParam, LRESULT& returnValue) { return false; };
-	virtual void GetColumnText(wchar_t *dest, int row, int col);
-	virtual int GetRowCount();
+	bool WindowMessage(UINT msg, WPARAM wParam, LPARAM lParam, LRESULT &returnValue) override { return false; }
+	void GetColumnText(wchar_t *dest, int row, int col) override;
+	int GetRowCount() override;
 
 private:
 	void FormatVertCol(wchar_t *dest, const GPUDebugVertex &vert, int col);
@@ -57,12 +57,12 @@ public:
 	TabVertices(HINSTANCE _hInstance, HWND _hParent);
 	~TabVertices();
 
-	virtual void Update() {
+	void Update() override {
 		values->Update();
 	}
 
 protected:
-	BOOL DlgProc(UINT message, WPARAM wParam, LPARAM lParam);
+	BOOL DlgProc(UINT message, WPARAM wParam, LPARAM lParam) override;
 
 private:
 	void UpdateSize(WORD width, WORD height);
@@ -75,9 +75,22 @@ public:
 	CtrlMatrixList(HWND hwnd);
 
 protected:
-	virtual bool WindowMessage(UINT msg, WPARAM wParam, LPARAM lParam, LRESULT& returnValue) { return false; };
-	virtual void GetColumnText(wchar_t *dest, int row, int col);
-	virtual int GetRowCount();
+	bool WindowMessage(UINT msg, WPARAM wParam, LPARAM lParam, LRESULT &returnValue) override {
+		return false;
+	}
+	void GetColumnText(wchar_t *dest, int row, int col) override;
+	int GetRowCount() override;
+	void OnDoubleClick(int row, int column) override;
+	void OnRightClick(int row, int column, const POINT &point) override;
+
+	bool ListenColPrePaint() override { return true; }
+	bool OnColPrePaint(int row, int col, LPNMLVCUSTOMDRAW msg) override;
+
+private:
+	bool GetValue(const GPUgstate &state, int row, int col, float &val);
+	bool ColChanged(const GPUgstate &lastState, const GPUgstate &state, int row, int col);
+	void ToggleBreakpoint(int row);
+	void PromptBreakpointCond(int row);
 };
 
 class TabMatrices : public Dialog {
@@ -85,12 +98,12 @@ public:
 	TabMatrices(HINSTANCE _hInstance, HWND _hParent);
 	~TabMatrices();
 
-	virtual void Update() {
+	void Update() override {
 		values->Update();
 	}
 
 protected:
-	BOOL DlgProc(UINT message, WPARAM wParam, LPARAM lParam);
+	BOOL DlgProc(UINT message, WPARAM wParam, LPARAM lParam) override;
 
 private:
 	void UpdateSize(WORD width, WORD height);

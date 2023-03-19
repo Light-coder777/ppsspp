@@ -7,6 +7,7 @@ GPUDIR			= $(CORE_DIR)/GPU
 EXTDIR			= $(CORE_DIR)/ext
 NATIVEDIR		= $(EXTDIR)/native
 ZSTDDIR                 = $(EXTDIR)/zstd/lib
+LIBRETROCOMMONDIR       = $(LIBRETRODIR)/libretro-common
 
 SOURCES_CXX   :=
 SOURCES_C     :=
@@ -16,15 +17,20 @@ INCFLAGS += \
 	-I$(CORE_DIR) \
 	-I$(COMMONDIR) \
 	-I$(CORE_DIR)/libretro \
+	-I$(EXTDIR)/openxr \
 	-I$(EXTDIR)/glslang \
+	-I$(EXTDIR)/glslang-build \
 	-I$(EXTDIR)/native \
 	-I$(EXTDIR)/zlib \
+	-I$(EXTDIR)/cpu_features/include \
 	-I$(ZSTDDIR) \
 	-I$(EXTDIR)/snappy \
 	-I$(FFMPEGDIR) \
 	$(FFMPEGINCFLAGS) \
 	-I$(EXTDIR)/cityhash \
 	-I$(EXTDIR)/armips \
+	-I$(EXTDIR)/armips/ext/filesystem/include \
+	-I$(EXTDIR)/armips/ext/tinyformat \
 	-I$(EXTDIR)/zstd/lib \
 	-I$(EXTDIR) \
 	-I$(NATIVEDIR) \
@@ -34,137 +40,131 @@ INCFLAGS += \
 	-I$(EXTDIR)/xxhash \
 	-I$(EXTDIR)/glew
 
-ifeq ($(PLATFORM_EXT), android)
-	INCFLAGS += -I$(EXTDIR)/libzip
+INCFLAGS += -I$(EXTDIR)/libzip
+SOURCES_C += \
+	$(EXTDIR)/libzip/zip_add.c \
+	$(EXTDIR)/libzip/zip_add_dir.c \
+	$(EXTDIR)/libzip/zip_add_entry.c \
+	$(EXTDIR)/libzip/zip_algorithm_deflate.c \
+	$(EXTDIR)/libzip/zip_buffer.c \
+	$(EXTDIR)/libzip/zip_close.c \
+	$(EXTDIR)/libzip/zip_delete.c \
+	$(EXTDIR)/libzip/zip_dir_add.c \
+	$(EXTDIR)/libzip/zip_dirent.c \
+	$(EXTDIR)/libzip/zip_discard.c \
+	$(EXTDIR)/libzip/zip_entry.c \
+	$(EXTDIR)/libzip/zip_error.c \
+	$(EXTDIR)/libzip/zip_error_clear.c \
+	$(EXTDIR)/libzip/zip_error_get.c \
+	$(EXTDIR)/libzip/zip_error_get_sys_type.c \
+	$(EXTDIR)/libzip/zip_error_strerror.c \
+	$(EXTDIR)/libzip/zip_error_to_str.c \
+	$(EXTDIR)/libzip/zip_extra_field.c \
+	$(EXTDIR)/libzip/zip_extra_field_api.c \
+	$(EXTDIR)/libzip/zip_fclose.c \
+	$(EXTDIR)/libzip/zip_fdopen.c \
+	$(EXTDIR)/libzip/zip_file_add.c \
+	$(EXTDIR)/libzip/zip_file_error_clear.c \
+	$(EXTDIR)/libzip/zip_file_error_get.c \
+	$(EXTDIR)/libzip/zip_file_get_comment.c \
+	$(EXTDIR)/libzip/zip_file_get_external_attributes.c \
+	$(EXTDIR)/libzip/zip_file_get_offset.c \
+	$(EXTDIR)/libzip/zip_file_rename.c \
+	$(EXTDIR)/libzip/zip_file_replace.c \
+	$(EXTDIR)/libzip/zip_file_set_comment.c \
+	$(EXTDIR)/libzip/zip_file_set_encryption.c \
+	$(EXTDIR)/libzip/zip_file_set_external_attributes.c \
+	$(EXTDIR)/libzip/zip_file_set_mtime.c \
+	$(EXTDIR)/libzip/zip_file_strerror.c \
+	$(EXTDIR)/libzip/zip_fopen.c \
+	$(EXTDIR)/libzip/zip_fopen_encrypted.c \
+	$(EXTDIR)/libzip/zip_fopen_index.c \
+	$(EXTDIR)/libzip/zip_fopen_index_encrypted.c \
+	$(EXTDIR)/libzip/zip_fread.c \
+	$(EXTDIR)/libzip/zip_fseek.c \
+	$(EXTDIR)/libzip/zip_ftell.c \
+	$(EXTDIR)/libzip/zip_get_archive_comment.c \
+	$(EXTDIR)/libzip/zip_get_archive_flag.c \
+	$(EXTDIR)/libzip/zip_get_encryption_implementation.c \
+	$(EXTDIR)/libzip/zip_get_file_comment.c \
+	$(EXTDIR)/libzip/zip_get_name.c \
+	$(EXTDIR)/libzip/zip_get_num_entries.c \
+	$(EXTDIR)/libzip/zip_get_num_files.c \
+	$(EXTDIR)/libzip/zip_hash.c \
+	$(EXTDIR)/libzip/zip_io_util.c \
+	$(EXTDIR)/libzip/zip_libzip_version.c \
+	$(EXTDIR)/libzip/zip_memdup.c \
+	$(EXTDIR)/libzip/zip_name_locate.c \
+	$(EXTDIR)/libzip/zip_new.c \
+	$(EXTDIR)/libzip/zip_open.c \
+	$(EXTDIR)/libzip/zip_pkware.c \
+	$(EXTDIR)/libzip/zip_progress.c \
+	$(EXTDIR)/libzip/zip_rename.c \
+	$(EXTDIR)/libzip/zip_replace.c \
+	$(EXTDIR)/libzip/zip_set_archive_comment.c \
+	$(EXTDIR)/libzip/zip_set_archive_flag.c \
+	$(EXTDIR)/libzip/zip_set_default_password.c \
+	$(EXTDIR)/libzip/zip_set_file_comment.c \
+	$(EXTDIR)/libzip/zip_set_file_compression.c \
+	$(EXTDIR)/libzip/zip_set_name.c \
+	$(EXTDIR)/libzip/zip_source_accept_empty.c \
+	$(EXTDIR)/libzip/zip_source_begin_write.c \
+	$(EXTDIR)/libzip/zip_source_begin_write_cloning.c \
+	$(EXTDIR)/libzip/zip_source_buffer.c \
+	$(EXTDIR)/libzip/zip_source_call.c \
+	$(EXTDIR)/libzip/zip_source_close.c \
+	$(EXTDIR)/libzip/zip_source_commit_write.c \
+	$(EXTDIR)/libzip/zip_source_compress.c \
+	$(EXTDIR)/libzip/zip_source_crc.c \
+	$(EXTDIR)/libzip/zip_source_error.c \
+	$(EXTDIR)/libzip/zip_source_file_common.c \
+	$(EXTDIR)/libzip/zip_source_file_stdio.c \
+	$(EXTDIR)/libzip/zip_source_free.c \
+	$(EXTDIR)/libzip/zip_source_function.c \
+	$(EXTDIR)/libzip/zip_source_get_file_attributes.c \
+	$(EXTDIR)/libzip/zip_source_is_deleted.c \
+	$(EXTDIR)/libzip/zip_source_layered.c \
+	$(EXTDIR)/libzip/zip_source_open.c \
+	$(EXTDIR)/libzip/zip_source_pkware_decode.c \
+	$(EXTDIR)/libzip/zip_source_pkware_encode.c \
+	$(EXTDIR)/libzip/zip_source_read.c \
+	$(EXTDIR)/libzip/zip_source_remove.c \
+	$(EXTDIR)/libzip/zip_source_rollback_write.c \
+	$(EXTDIR)/libzip/zip_source_seek.c \
+	$(EXTDIR)/libzip/zip_source_seek_write.c \
+	$(EXTDIR)/libzip/zip_source_stat.c \
+	$(EXTDIR)/libzip/zip_source_supports.c \
+	$(EXTDIR)/libzip/zip_source_tell.c \
+	$(EXTDIR)/libzip/zip_source_tell_write.c \
+	$(EXTDIR)/libzip/zip_source_window.c \
+	$(EXTDIR)/libzip/zip_source_write.c \
+	$(EXTDIR)/libzip/zip_source_zip.c \
+	$(EXTDIR)/libzip/zip_source_zip_new.c \
+	$(EXTDIR)/libzip/zip_stat.c \
+	$(EXTDIR)/libzip/zip_stat_index.c \
+	$(EXTDIR)/libzip/zip_stat_init.c \
+	$(EXTDIR)/libzip/zip_strerror.c \
+	$(EXTDIR)/libzip/zip_string.c \
+	$(EXTDIR)/libzip/zip_unchange.c \
+	$(EXTDIR)/libzip/zip_unchange_all.c \
+	$(EXTDIR)/libzip/zip_unchange_archive.c \
+	$(EXTDIR)/libzip/zip_unchange_data.c \
+	$(EXTDIR)/libzip/zip_utf-8.c \
+	$(EXTDIR)/libzip/zip_err_str.c
+
+ifeq ($(PLATFORM_EXT), win32)
 	SOURCES_C += \
-		$(EXTDIR)/libzip/zip_add.c \
-		$(EXTDIR)/libzip/zip_add_dir.c \
-		$(EXTDIR)/libzip/zip_add_entry.c \
-		$(EXTDIR)/libzip/zip_algorithm_deflate.c \
-		$(EXTDIR)/libzip/zip_buffer.c \
-		$(EXTDIR)/libzip/zip_close.c \
-		$(EXTDIR)/libzip/zip_delete.c \
-		$(EXTDIR)/libzip/zip_dir_add.c \
-		$(EXTDIR)/libzip/zip_dirent.c \
-		$(EXTDIR)/libzip/zip_discard.c \
-		$(EXTDIR)/libzip/zip_entry.c \
-		$(EXTDIR)/libzip/zip_error.c \
-		$(EXTDIR)/libzip/zip_error_clear.c \
-		$(EXTDIR)/libzip/zip_error_get.c \
-		$(EXTDIR)/libzip/zip_error_get_sys_type.c \
-		$(EXTDIR)/libzip/zip_error_strerror.c \
-		$(EXTDIR)/libzip/zip_error_to_str.c \
-		$(EXTDIR)/libzip/zip_extra_field.c \
-		$(EXTDIR)/libzip/zip_extra_field_api.c \
-		$(EXTDIR)/libzip/zip_fclose.c \
-		$(EXTDIR)/libzip/zip_fdopen.c \
-		$(EXTDIR)/libzip/zip_file_add.c \
-		$(EXTDIR)/libzip/zip_file_error_clear.c \
-		$(EXTDIR)/libzip/zip_file_error_get.c \
-		$(EXTDIR)/libzip/zip_file_get_comment.c \
-		$(EXTDIR)/libzip/zip_file_get_external_attributes.c \
-		$(EXTDIR)/libzip/zip_file_get_offset.c \
-		$(EXTDIR)/libzip/zip_file_rename.c \
-		$(EXTDIR)/libzip/zip_file_replace.c \
-		$(EXTDIR)/libzip/zip_file_set_comment.c \
-		$(EXTDIR)/libzip/zip_file_set_encryption.c \
-		$(EXTDIR)/libzip/zip_file_set_external_attributes.c \
-		$(EXTDIR)/libzip/zip_file_set_mtime.c \
-		$(EXTDIR)/libzip/zip_file_strerror.c \
-		$(EXTDIR)/libzip/zip_fopen.c \
-		$(EXTDIR)/libzip/zip_fopen_encrypted.c \
-		$(EXTDIR)/libzip/zip_fopen_index.c \
-		$(EXTDIR)/libzip/zip_fopen_index_encrypted.c \
-		$(EXTDIR)/libzip/zip_fread.c \
-		$(EXTDIR)/libzip/zip_fseek.c \
-		$(EXTDIR)/libzip/zip_ftell.c \
-		$(EXTDIR)/libzip/zip_get_archive_comment.c \
-		$(EXTDIR)/libzip/zip_get_archive_flag.c \
-		$(EXTDIR)/libzip/zip_get_encryption_implementation.c \
-		$(EXTDIR)/libzip/zip_get_file_comment.c \
-		$(EXTDIR)/libzip/zip_get_name.c \
-		$(EXTDIR)/libzip/zip_get_num_entries.c \
-		$(EXTDIR)/libzip/zip_get_num_files.c \
-		$(EXTDIR)/libzip/zip_hash.c \
-		$(EXTDIR)/libzip/zip_io_util.c \
-		$(EXTDIR)/libzip/zip_libzip_version.c \
-		$(EXTDIR)/libzip/zip_memdup.c \
-		$(EXTDIR)/libzip/zip_name_locate.c \
-		$(EXTDIR)/libzip/zip_new.c \
-		$(EXTDIR)/libzip/zip_open.c \
-		$(EXTDIR)/libzip/zip_pkware.c \
-		$(EXTDIR)/libzip/zip_progress.c \
-		$(EXTDIR)/libzip/zip_rename.c \
-		$(EXTDIR)/libzip/zip_replace.c \
-		$(EXTDIR)/libzip/zip_set_archive_comment.c \
-		$(EXTDIR)/libzip/zip_set_archive_flag.c \
-		$(EXTDIR)/libzip/zip_set_default_password.c \
-		$(EXTDIR)/libzip/zip_set_file_comment.c \
-		$(EXTDIR)/libzip/zip_set_file_compression.c \
-		$(EXTDIR)/libzip/zip_set_name.c \
-		$(EXTDIR)/libzip/zip_source_accept_empty.c \
-		$(EXTDIR)/libzip/zip_source_begin_write.c \
-		$(EXTDIR)/libzip/zip_source_begin_write_cloning.c \
-		$(EXTDIR)/libzip/zip_source_buffer.c \
-		$(EXTDIR)/libzip/zip_source_call.c \
-		$(EXTDIR)/libzip/zip_source_close.c \
-		$(EXTDIR)/libzip/zip_source_commit_write.c \
-		$(EXTDIR)/libzip/zip_source_compress.c \
-		$(EXTDIR)/libzip/zip_source_crc.c \
-		$(EXTDIR)/libzip/zip_source_error.c \
-		$(EXTDIR)/libzip/zip_source_file_common.c \
-		$(EXTDIR)/libzip/zip_source_file_stdio.c \
-		$(EXTDIR)/libzip/zip_source_free.c \
-		$(EXTDIR)/libzip/zip_source_function.c \
-		$(EXTDIR)/libzip/zip_source_get_file_attributes.c \
-		$(EXTDIR)/libzip/zip_source_is_deleted.c \
-		$(EXTDIR)/libzip/zip_source_layered.c \
-		$(EXTDIR)/libzip/zip_source_open.c \
-		$(EXTDIR)/libzip/zip_source_pkware_decode.c \
-		$(EXTDIR)/libzip/zip_source_pkware_encode.c \
-		$(EXTDIR)/libzip/zip_source_read.c \
-		$(EXTDIR)/libzip/zip_source_remove.c \
-		$(EXTDIR)/libzip/zip_source_rollback_write.c \
-		$(EXTDIR)/libzip/zip_source_seek.c \
-		$(EXTDIR)/libzip/zip_source_seek_write.c \
-		$(EXTDIR)/libzip/zip_source_stat.c \
-		$(EXTDIR)/libzip/zip_source_supports.c \
-		$(EXTDIR)/libzip/zip_source_tell.c \
-		$(EXTDIR)/libzip/zip_source_tell_write.c \
-		$(EXTDIR)/libzip/zip_source_window.c \
-		$(EXTDIR)/libzip/zip_source_write.c \
-		$(EXTDIR)/libzip/zip_source_zip.c \
-		$(EXTDIR)/libzip/zip_source_zip_new.c \
-		$(EXTDIR)/libzip/zip_stat.c \
-		$(EXTDIR)/libzip/zip_stat_index.c \
-		$(EXTDIR)/libzip/zip_stat_init.c \
-		$(EXTDIR)/libzip/zip_strerror.c \
-		$(EXTDIR)/libzip/zip_string.c \
-		$(EXTDIR)/libzip/zip_unchange.c \
-		$(EXTDIR)/libzip/zip_unchange_all.c \
-		$(EXTDIR)/libzip/zip_unchange_archive.c \
-		$(EXTDIR)/libzip/zip_unchange_data.c \
-		$(EXTDIR)/libzip/zip_utf-8.c \
-		$(EXTDIR)/libzip/zip_err_str.c
-
-	ifeq ($(PLATFORM_EXT), win32)
-		SOURCES_C += \
-			$(EXTDIR)/libzip/zip_source_file_win32.c \
-			$(EXTDIR)/libzip/zip_source_file_win32_named.c \
-			$(EXTDIR)/libzip/zip_source_file_win32_utf16.c \
-			$(EXTDIR)/libzip/zip_source_file_win32_utf8.c \
-			$(EXTDIR)/libzip/zip_source_file_win32_ansi.c \
-			$(EXTDIR)/libzip/zip_random_win32.c
-	else
-		SOURCES_C += \
-			$(EXTDIR)/libzip/zip_mkstempm.c \
-			$(EXTDIR)/libzip/zip_source_file_stdio_named.c \
-			$(EXTDIR)/libzip/zip_random_unix.c
-	endif
-
-	SOURCES_C +=\
-		$(COMMONDIR)/Math/fast/fast_math.c \
-		$(COMMONDIR)/Math/fast/fast_matrix.c
+		$(EXTDIR)/libzip/zip_source_file_win32.c \
+		$(EXTDIR)/libzip/zip_source_file_win32_named.c \
+		$(EXTDIR)/libzip/zip_source_file_win32_utf16.c \
+		$(EXTDIR)/libzip/zip_source_file_win32_utf8.c \
+		$(EXTDIR)/libzip/zip_source_file_win32_ansi.c \
+		$(EXTDIR)/libzip/zip_random_win32.c
+else
+	SOURCES_C += \
+		$(EXTDIR)/libzip/zip_mkstempm.c \
+		$(EXTDIR)/libzip/zip_source_file_stdio_named.c \
+		$(EXTDIR)/libzip/zip_random_unix.c
 endif
 
 SOURCES_C += $(LIBRETRODIR)/ext/glew/glew.c
@@ -193,6 +193,37 @@ SOURCES_C += \
 	$(EXTDIR)/libpng17/pngwtran.c \
 	$(EXTDIR)/libpng17/pngwutil.c
 
+COREFLAGS += -DSTACK_LINE_READER_BUFFER_SIZE=1024
+ifeq ($(PLATFORM_EXT), android)
+COREFLAGS += -DHAVE_DLFCN_H
+else ifneq ($(PLATFORM_EXT), win32)
+COREFLAGS += -DHAVE_STRONG_GETAUXVAL
+endif
+ifneq (,$(findstring osx,$(platform)))
+ifneq (,$(findstring x86,$(TARGET_ARCH)))
+	COREFLAGS += -DHAVE_SYSCTLBYNAME
+endif
+endif
+SOURCES_C += \
+	$(EXTDIR)/cpu_features/src/filesystem.c \
+	$(EXTDIR)/cpu_features/src/impl_aarch64_linux_or_android.c \
+	$(EXTDIR)/cpu_features/src/impl_arm_linux_or_android.c \
+	$(EXTDIR)/cpu_features/src/impl_mips_linux_or_android.c \
+	$(EXTDIR)/cpu_features/src/impl_ppc_linux.c \
+	$(EXTDIR)/cpu_features/src/impl_riscv_linux.c \
+	$(EXTDIR)/cpu_features/src/impl_s390x_linux.c \
+	$(EXTDIR)/cpu_features/src/impl_x86_freebsd.c \
+	$(EXTDIR)/cpu_features/src/impl_x86_linux_or_android.c \
+	$(EXTDIR)/cpu_features/src/impl_x86_macos.c \
+	$(EXTDIR)/cpu_features/src/impl_x86_windows.c \
+	$(EXTDIR)/cpu_features/src/stack_line_reader.c \
+	$(EXTDIR)/cpu_features/src/string_view.c
+
+ifneq ($(PLATFORM_EXT), win32)
+SOURCES_C += \
+	$(EXTDIR)/cpu_features/src/hwcaps.c
+endif
+
 SOURCES_CXX += \
     $(EXTDIR)/vma/vk_mem_alloc.cpp
 
@@ -213,6 +244,12 @@ SOURCES_CXX += \
 SOURCES_CXX += $(EXTDIR)/cityhash/city.cpp
 
 SOURCES_CXX += \
+	$(EXTDIR)/basis_universal/basisu_transcoder.cpp
+
+SOURCES_CXX += \
+	$(EXTDIR)/armips/Core/Types.cpp
+
+SOURCES_CXX += \
 	$(COMMONDIR)/Crypto/md5.cpp \
 	$(COMMONDIR)/Crypto/sha1.cpp \
 	$(COMMONDIR)/Crypto/sha256.cpp
@@ -227,6 +264,7 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Data/Format/IniFile.cpp \
 	$(COMMONDIR)/Data/Format/JSONReader.cpp \
 	$(COMMONDIR)/Data/Format/JSONWriter.cpp \
+	$(COMMONDIR)/Data/Format/DDSLoad.cpp \
 	$(COMMONDIR)/Data/Format/PNGLoad.cpp \
 	$(COMMONDIR)/Data/Format/ZIMLoad.cpp \
 	$(COMMONDIR)/Data/Format/ZIMSave.cpp \
@@ -235,7 +273,8 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Data/Text/Parsers.cpp \
 	$(COMMONDIR)/Data/Text/WrapText.cpp \
 	$(COMMONDIR)/File/VFS/VFS.cpp \
-	$(COMMONDIR)/File/VFS/AssetReader.cpp \
+	$(COMMONDIR)/File/VFS/DirectoryReader.cpp \
+	$(COMMONDIR)/File/VFS/ZipFileReader.cpp \
 	$(COMMONDIR)/File/AndroidStorage.cpp \
 	$(COMMONDIR)/File/DiskFree.cpp \
 	$(COMMONDIR)/File/Path.cpp \
@@ -251,22 +290,28 @@ SOURCES_CXX += \
 	$(COMMONDIR)/GPU/OpenGL/GLDebugLog.cpp \
 	$(COMMONDIR)/GPU/OpenGL/GLSLProgram.cpp \
 	$(COMMONDIR)/GPU/OpenGL/GLFeatures.cpp \
+	$(COMMONDIR)/GPU/OpenGL/GLFrameData.cpp \
 	$(COMMONDIR)/GPU/OpenGL/GLRenderManager.cpp \
 	$(COMMONDIR)/GPU/OpenGL/GLQueueRunner.cpp \
 	$(COMMONDIR)/GPU/OpenGL/DataFormatGL.cpp \
 	$(COMMONDIR)/GPU/Vulkan/thin3d_vulkan.cpp \
 	$(COMMONDIR)/GPU/Vulkan/VulkanQueueRunner.cpp \
 	$(COMMONDIR)/GPU/Vulkan/VulkanRenderManager.cpp \
+	$(COMMONDIR)/GPU/Vulkan/VulkanFrameData.cpp \
 	$(COMMONDIR)/GPU/Vulkan/VulkanLoader.cpp \
 	$(COMMONDIR)/GPU/Vulkan/VulkanContext.cpp \
 	$(COMMONDIR)/GPU/Vulkan/VulkanDebug.cpp \
 	$(COMMONDIR)/GPU/Vulkan/VulkanImage.cpp \
+	$(COMMONDIR)/GPU/Vulkan/VulkanFramebuffer.cpp \
 	$(COMMONDIR)/GPU/Vulkan/VulkanMemory.cpp \
+	$(COMMONDIR)/GPU/Vulkan/VulkanProfiler.cpp \
+	$(COMMONDIR)/GPU/Vulkan/VulkanBarrier.cpp \
 	$(COMMONDIR)/Input/GestureDetector.cpp \
 	$(COMMONDIR)/Input/InputState.cpp \
 	$(COMMONDIR)/Math/curves.cpp \
 	$(COMMONDIR)/Math/expression_parser.cpp \
 	$(COMMONDIR)/Math/math_util.cpp \
+	$(COMMONDIR)/Math/Statistics.cpp \
 	$(COMMONDIR)/Math/lin/vec3.cpp \
 	$(COMMONDIR)/Math/lin/matrix4x4.cpp \
 	$(COMMONDIR)/Net/HTTPClient.cpp \
@@ -277,12 +322,14 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Net/Sinks.cpp \
 	$(COMMONDIR)/Net/URL.cpp \
 	$(COMMONDIR)/Net/WebsocketServer.cpp \
+	$(COMMONDIR)/Render/ManagedTexture.cpp \
 	$(COMMONDIR)/Render/DrawBuffer.cpp \
 	$(COMMONDIR)/Render/TextureAtlas.cpp \
 	$(COMMONDIR)/Serialize/Serializer.cpp \
 	$(COMMONDIR)/Thread/ThreadUtil.cpp \
 	$(COMMONDIR)/Thread/ParallelLoop.cpp \
 	$(COMMONDIR)/Thread/ThreadManager.cpp \
+	$(COMMONDIR)/UI/AsyncImageFileView.cpp \
 	$(COMMONDIR)/UI/Root.cpp \
 	$(COMMONDIR)/UI/Screen.cpp \
 	$(COMMONDIR)/UI/UI.cpp \
@@ -291,6 +338,8 @@ SOURCES_CXX += \
 	$(COMMONDIR)/UI/Tween.cpp \
 	$(COMMONDIR)/UI/View.cpp \
 	$(COMMONDIR)/UI/ViewGroup.cpp \
+	$(COMMONDIR)/UI/ScrollView.cpp \
+	$(COMMONDIR)/UI/PopupScreens.cpp \
 	$(COMMONDIR)/System/Display.cpp \
 	$(COMMONDIR)/ArmCPUDetect.cpp \
 	$(COMMONDIR)/CPUDetect.cpp \
@@ -309,10 +358,21 @@ SOURCES_CXX += \
 	$(COMMONDIR)/StringUtils.cpp \
 	$(COMMONDIR)/TimeUtil.cpp
 
+SOURCES_CXX += \
+	$(COMMONDIR)/VR/OpenXRLoader.cpp \
+	$(COMMONDIR)/VR/PPSSPPVR.cpp \
+	$(COMMONDIR)/VR/VRBase.cpp \
+	$(COMMONDIR)/VR/VRMath.cpp \
+	$(COMMONDIR)/VR/VRFramebuffer.cpp \
+	$(COMMONDIR)/VR/VRInput.cpp \
+	$(COMMONDIR)/VR/VRRenderer.cpp
+
 SOURCES_C +=\
-	$(COMMONDIR)/GPU/OpenGL/gl3stub.c
+	$(COMMONDIR)/GPU/OpenGL/gl3stub.c \
+	$(COMMONDIR)/Math/fast/fast_matrix.c
 
 SOURCES_CXX += \
+	$(GPUCOMMONDIR)/Draw2D.cpp \
 	$(GPUCOMMONDIR)/VertexDecoderCommon.cpp \
 	$(GPUCOMMONDIR)/GPUStateUtils.cpp \
 	$(GPUCOMMONDIR)/DrawEngineCommon.cpp \
@@ -324,22 +384,28 @@ SOURCES_CXX += \
 	$(GPUCOMMONDIR)/ShaderCommon.cpp \
 	$(GPUCOMMONDIR)/ShaderUniforms.cpp \
 	$(GPUCOMMONDIR)/GPUDebugInterface.cpp \
+	$(GPUCOMMONDIR)/TextureShaderCommon.cpp \
 	$(GPUCOMMONDIR)/DepalettizeShaderCommon.cpp \
 	$(GPUCOMMONDIR)/TransformCommon.cpp \
 	$(GPUCOMMONDIR)/IndexGenerator.cpp \
 	$(GPUCOMMONDIR)/TextureDecoder.cpp \
 	$(GPUCOMMONDIR)/PostShader.cpp \
+	$(GPUCOMMONDIR)/TextureReplacer.cpp \
+	$(GPUCOMMONDIR)/ReplacedTexture.cpp \
 	$(COMMONDIR)/Data/Convert/ColorConv.cpp \
 	$(GPUDIR)/Debugger/Breakpoints.cpp \
 	$(GPUDIR)/Debugger/Debugger.cpp \
+	$(GPUDIR)/Debugger/GECommandTable.cpp \
 	$(GPUDIR)/Debugger/Playback.cpp \
 	$(GPUDIR)/Debugger/Record.cpp \
 	$(GPUDIR)/Debugger/Stepping.cpp \
 	$(GPUDIR)/Common/FragmentShaderGenerator.cpp \
 	$(GPUDIR)/Common/VertexShaderGenerator.cpp \
+	$(GPUDIR)/Common/GeometryShaderGenerator.cpp \
 	$(GPUDIR)/Common/TextureCacheCommon.cpp \
 	$(GPUDIR)/Common/TextureScalerCommon.cpp \
 	$(GPUDIR)/Common/SoftwareTransformCommon.cpp \
+	$(GPUDIR)/Common/DepthBufferCommon.cpp \
 	$(GPUDIR)/Common/StencilCommon.cpp \
 	$(GPUDIR)/Software/TransformUnit.cpp \
 	$(GPUDIR)/Software/SoftGpu.cpp \
@@ -347,9 +413,11 @@ SOURCES_CXX += \
 	$(GPUDIR)/GeConstants.cpp \
 	$(GPUDIR)/GeDisasm.cpp \
 	$(GPUDIR)/GPUCommon.cpp \
+	$(GPUDIR)/GPUCommonHW.cpp \
 	$(GPUDIR)/GPU.cpp \
 	$(GPUDIR)/GPUState.cpp \
 	$(GPUDIR)/Math3D.cpp \
+	$(GPUDIR)/Software/BinManager.cpp \
 	$(GPUDIR)/Software/Clipper.cpp \
 	$(GPUDIR)/Software/DrawPixel.cpp \
 	$(GPUDIR)/Software/FuncId.cpp \
@@ -357,17 +425,14 @@ SOURCES_CXX += \
 	$(GPUDIR)/Software/Rasterizer.cpp \
 	$(GPUDIR)/Software/RasterizerRectangle.cpp \
 	$(GPUDIR)/Software/RasterizerRegCache.cpp \
-	$(GPUDIR)/GLES/DepalettizeShaderGLES.cpp \
-	$(GPUDIR)/GLES/DepthBufferGLES.cpp \
+	$(GPUDIR)/GLES/StencilBufferGLES.cpp \
 	$(GPUDIR)/GLES/DrawEngineGLES.cpp \
 	$(GPUDIR)/GLES/GPU_GLES.cpp \
 	$(GPUDIR)/GLES/FragmentTestCacheGLES.cpp \
 	$(GPUDIR)/GLES/FramebufferManagerGLES.cpp \
 	$(GPUDIR)/GLES/TextureCacheGLES.cpp \
-	$(GPUDIR)/GLES/TextureScalerGLES.cpp \
 	$(GPUDIR)/GLES/ShaderManagerGLES.cpp \
 	$(GPUDIR)/GLES/StateMappingGLES.cpp \
-	$(GPUDIR)/GLES/StencilBufferGLES.cpp \
 	$(EXTDIR)/glslang/OGLCompilersDLL/InitializeDll.cpp \
 	$(EXTDIR)/glslang/glslang/GenericCodeGen/CodeGen.cpp \
 	$(EXTDIR)/glslang/glslang/GenericCodeGen/Link.cpp \
@@ -398,6 +463,7 @@ SOURCES_CXX += \
 	$(EXTDIR)/glslang/glslang/MachineIndependent/parseConst.cpp \
 	$(EXTDIR)/glslang/glslang/MachineIndependent/propagateNoContraction.cpp \
 	$(EXTDIR)/glslang/glslang/MachineIndependent/reflection.cpp \
+	$(EXTDIR)/glslang/glslang/MachineIndependent/SpirvIntrinsics.cpp \
 	$(EXTDIR)/glslang/SPIRV/InReadableOrder.cpp \
 	$(EXTDIR)/glslang/SPIRV/GlslangToSpv.cpp \
 	$(EXTDIR)/glslang/SPIRV/Logger.cpp \
@@ -435,7 +501,6 @@ SOURCES_CXX += \
 	       $(COREDIR)/AVIDump.cpp \
 	       $(COREDIR)/Config.cpp \
 	       $(COREDIR)/ControlMapper.cpp \
-	       $(COREDIR)/TextureReplacer.cpp \
 	       $(COREDIR)/Core.cpp \
 	       $(COREDIR)/WaveFile.cpp \
 	       $(COREDIR)/KeyMap.cpp \
@@ -457,6 +522,7 @@ SOURCES_CXX += \
 	       $(COREDIR)/Dialog/PSPGamedataInstallDialog.cpp \
 	       $(COREDIR)/Dialog/PSPMsgDialog.cpp \
 	       $(COREDIR)/Dialog/PSPNetconfDialog.cpp \
+		   $(COREDIR)/Dialog/PSPNpSigninDialog.cpp \
 	       $(COREDIR)/Dialog/PSPOskDialog.cpp \
 	       $(COREDIR)/Dialog/PSPSaveDialog.cpp \
 	       $(COREDIR)/Dialog/PSPScreenshotDialog.cpp \
@@ -544,10 +610,12 @@ SOURCES_CXX += \
 	       $(COREDIR)/HLE/sceVaudio.cpp \
 	       $(COREDIR)/HLE/scePspNpDrm_user.cpp \
 	       $(COREDIR)/HLE/sceNp.cpp \
+		   $(COREDIR)/HLE/sceNp2.cpp \
 	       $(COREDIR)/HLE/scePauth.cpp \
 	       $(COREDIR)/HLE/sceUsbGps.cpp \
 	       $(COREDIR)/HW/BufferQueue.cpp \
 	       $(COREDIR)/HW/Camera.cpp \
+	       $(COREDIR)/HW/Display.cpp \
 	       $(COREDIR)/HW/SimpleAudioDec.cpp \
 	       $(COREDIR)/HW/AsyncIOManager.cpp \
 	       $(COREDIR)/HW/MediaEngine.cpp \
@@ -597,8 +665,7 @@ SOURCES_CXX += \
 	       $(COREDIR)/Util/PPGeDraw.cpp \
 	       $(COREDIR)/Util/AudioFormat.cpp \
 	       $(COREDIR)/Util/PortManager.cpp \
-          $(CORE_DIR)/UI/TextureUtil.cpp \
-          $(CORE_DIR)/UI/GameInfoCache.cpp
+           $(CORE_DIR)/UI/GameInfoCache.cpp
 
 SOURCES_CXX += $(COREDIR)/HLE/__sceAudio.cpp
 
@@ -624,15 +691,11 @@ ifeq ($(WITH_DYNAREC),1)
 		ifeq ($(HAVE_NEON),1)
 			SOURCES_CXX   += \
 					 $(COREDIR)/MIPS/ARM/ArmCompVFPUNEON.cpp \
-					 $(COREDIR)/MIPS/ARM/ArmCompVFPUNEONUtil.cpp \
-					 $(COREDIR)/Util/AudioFormatNEON.cpp \
-					 $(COMMONDIR)/Data/Convert/ColorConvNEON.cpp \
-					 $(GPUDIR)/Common/TextureDecoderNEON.cpp
+					 $(COREDIR)/MIPS/ARM/ArmCompVFPUNEONUtil.cpp
 
 			SOURCES_C += $(EXTDIR)/libpng17/arm/arm_init.c \
 				     $(EXTDIR)/libpng17/arm/filter_neon_intrinsics.c
-			ASMFILES   += $(COMMONDIR)/Math/fast/fast_matrix_neon.S \
-				      $(EXTDIR)/libpng17/arm/filter_neon.S
+			ASMFILES   += $(EXTDIR)/libpng17/arm/filter_neon.S
 		endif
 	else ifeq ($(TARGET_ARCH),arm64)
       DYNAFLAGS += -D_ARCH_64
@@ -653,15 +716,11 @@ ifeq ($(WITH_DYNAREC),1)
 		ifeq ($(HAVE_NEON),1)
 			SOURCES_CXX   += \
 					 $(COREDIR)/MIPS/ARM/ArmCompVFPUNEON.cpp \
-					 $(COREDIR)/MIPS/ARM/ArmCompVFPUNEONUtil.cpp \
-					 $(COREDIR)/Util/AudioFormatNEON.cpp \
-					 $(COMMONDIR)/Data/Convert/ColorConvNEON.cpp \
-					 $(GPUDIR)/Common/TextureDecoderNEON.cpp
+					 $(COREDIR)/MIPS/ARM/ArmCompVFPUNEONUtil.cpp
 
 			SOURCES_C += $(EXTDIR)/libpng17/arm/arm_init.c \
 				     $(EXTDIR)/libpng17/arm/filter_neon_intrinsics.c
-			ASMFILES   += $(COMMONDIR)/math/fast/fast_matrix_neon.S \
-				      $(EXTDIR)/libpng17/arm/filter_neon.S
+			ASMFILES   += $(EXTDIR)/libpng17/arm/filter_neon.S
 		endif
    else
 	ifneq (,$(findstring msvc,$(platform)))
@@ -697,7 +756,6 @@ ifeq ($(WITH_DYNAREC),1)
 						$(COREDIR)/MIPS/x86/RegCache.cpp \
 						$(COREDIR)/MIPS/x86/RegCacheFPU.cpp \
 						$(GPUDIR)/Common/VertexDecoderX86.cpp
-		SOURCES_C   += $(COMMONDIR)/Math/fast/fast_matrix_sse.c
    endif
 endif
 #UDIS86
@@ -728,16 +786,13 @@ SOURCES_C += \
     $(EXTDIR)/miniupnp/miniupnpc/upnpreplyparse.c
 
 SOURCES_CXX += \
-	$(GPUDIR)/Vulkan/DepalettizeShaderVulkan.cpp \
 	$(GPUDIR)/Vulkan/DrawEngineVulkan.cpp \
 	$(GPUDIR)/Vulkan/FramebufferManagerVulkan.cpp \
 	$(GPUDIR)/Vulkan/GPU_Vulkan.cpp \
 	$(GPUDIR)/Vulkan/PipelineManagerVulkan.cpp \
 	$(GPUDIR)/Vulkan/ShaderManagerVulkan.cpp \
 	$(GPUDIR)/Vulkan/StateMappingVulkan.cpp \
-	$(GPUDIR)/Vulkan/StencilBufferVulkan.cpp \
 	$(GPUDIR)/Vulkan/TextureCacheVulkan.cpp \
-	$(GPUDIR)/Vulkan/TextureScalerVulkan.cpp \
 	$(GPUDIR)/Vulkan/VulkanUtil.cpp \
 	$(LIBRETRODIR)/LibretroVulkanContext.cpp \
 	$(LIBRETRODIR)/libretro_vulkan.cpp
@@ -745,27 +800,21 @@ SOURCES_CXX += \
 
 ifeq ($(PLATFORM_EXT), win32)
 SOURCES_CXX += \
-	$(GPUDIR)/Directx9/DepalettizeShaderDX9.cpp \
 	$(GPUDIR)/Directx9/DrawEngineDX9.cpp \
 	$(GPUDIR)/Directx9/FramebufferManagerDX9.cpp \
 	$(GPUDIR)/Directx9/GPU_DX9.cpp \
 	$(GPUDIR)/Directx9/ShaderManagerDX9.cpp \
 	$(GPUDIR)/Directx9/StateMappingDX9.cpp \
-	$(GPUDIR)/Directx9/StencilBufferDX9.cpp \
-	$(GPUDIR)/Directx9/TextureCacheDX9.cpp \
-	$(GPUDIR)/Directx9/TextureScalerDX9.cpp
+	$(GPUDIR)/Directx9/TextureCacheDX9.cpp
 
 SOURCES_CXX += \
-	$(GPUDIR)/D3D11/DepalettizeShaderD3D11.cpp \
 	$(GPUDIR)/D3D11/DrawEngineD3D11.cpp \
 	$(GPUDIR)/D3D11/FramebufferManagerD3D11.cpp \
 	$(GPUDIR)/D3D11/GPU_D3D11.cpp \
 	$(GPUDIR)/D3D11/D3D11Util.cpp \
 	$(GPUDIR)/D3D11/ShaderManagerD3D11.cpp \
 	$(GPUDIR)/D3D11/StateMappingD3D11.cpp \
-	$(GPUDIR)/D3D11/StencilBufferD3D11.cpp \
 	$(GPUDIR)/D3D11/TextureCacheD3D11.cpp \
-	$(GPUDIR)/D3D11/TextureScalerD3D11.cpp \
    $(LIBRETRODIR)/LibretroD3D11Context.cpp
 
 SOURCES_CXX += \
@@ -775,7 +824,7 @@ SOURCES_CXX += \
 	$(COMMONDIR)/GPU/D3D9/thin3d_d3d9.cpp \
 	$(COMMONDIR)/GPU/D3D11/D3D11Loader.cpp \
 	$(COMMONDIR)/GPU/D3D11/thin3d_d3d11.cpp
-	
+
 INCFLAGS += -I$(CORE_DIR)/dx9sdk/Include -I$(CORE_DIR)/dx9sdk/Include/DX11
 
 endif
@@ -791,11 +840,8 @@ SOURCES_C +=   $(ZSTDDIR)/common/debug.c \
                $(ZSTDDIR)/common/error_private.c \
                $(ZSTDDIR)/common/fse_decompress.c \
                $(ZSTDDIR)/common/pool.c \
-               $(ZSTDDIR)/common/threading.c
-
-#SOURCES_C +=   $(ZSTDDIR)/common/xxhash.c
-
-SOURCES_C +=   \
+               $(ZSTDDIR)/common/threading.c \
+               $(ZSTDDIR)/common/xxhash.c \
                $(ZSTDDIR)/common/zstd_common.c \
                $(ZSTDDIR)/compress/fse_compress.c \
                $(ZSTDDIR)/compress/hist.c \
@@ -819,6 +865,13 @@ SOURCES_C +=   \
                $(ZSTDDIR)/dictBuilder/fastcover.c \
                $(ZSTDDIR)/dictBuilder/zdict.c
 
+# zstd only uses asm for Linux/macOS and GNUC.
+ifneq ($(PLATFORM_EXT), win32)
+ifeq ($(TARGET_ARCH),x86_64)
+SOURCES_C +=   $(ZSTDDIR)/decompress/huf_decompress_amd64.S
+endif
+endif
+
 ifneq ($(STATIC_LINKING), 1)
 SOURCES_C += \
 		$(EXTDIR)/zlib/adler32.c \
@@ -835,6 +888,21 @@ SOURCES_C += \
 		$(EXTDIR)/zlib/trees.c \
 		$(EXTDIR)/zlib/uncompr.c \
 		$(EXTDIR)/zlib/zutil.c
+endif
+
+ifeq ($(HAVE_LIBRETRO_VFS), 1)
+DEFINES += -DHAVE_LIBRETRO_VFS
+INCFLAGS += -I$(LIBRETROCOMMONDIR)/include
+SOURCES_C += $(LIBRETROCOMMONDIR)/compat/compat_posix_string.c \
+             $(LIBRETROCOMMONDIR)/compat/fopen_utf8.c \
+             $(LIBRETROCOMMONDIR)/encodings/encoding_utf.c \
+             $(LIBRETROCOMMONDIR)/compat/compat_strl.c \
+             $(LIBRETROCOMMONDIR)/file/file_path.c \
+             $(LIBRETROCOMMONDIR)/streams/file_stream.c \
+             $(LIBRETROCOMMONDIR)/streams/file_stream_transforms.c \
+             $(LIBRETROCOMMONDIR)/string/stdstring.c \
+             $(LIBRETROCOMMONDIR)/time/rtime.c \
+             $(LIBRETROCOMMONDIR)/vfs/vfs_implementation.c
 endif
 
 GIT_VERSION_SRC = $(CORE_DIR)/git-version.cpp

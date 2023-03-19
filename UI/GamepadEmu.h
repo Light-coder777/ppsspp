@@ -29,12 +29,16 @@ class GamepadView : public UI::View {
 public:
 	GamepadView(const char *key, UI::LayoutParams *layoutParams);
 
-	void Touch(const TouchInput &input) override;
+	bool Touch(const TouchInput &input) override;
 	bool Key(const KeyInput &input) override {
 		return false;
 	}
 	void Update() override;
 	std::string DescribeText() const override;
+
+	void SetForceVisible(bool visible) {
+		forceVisible_ = visible;
+	}
 
 protected:
 	virtual float GetButtonOpacity();
@@ -42,6 +46,7 @@ protected:
 	const char *key_;
 	double lastFrameTime_;
 	float secondsWithoutTouch_ = 0.0;
+	bool forceVisible_ = false;
 };
 
 class MultiTouchButton : public GamepadView {
@@ -50,7 +55,7 @@ public:
 		: GamepadView(key, layoutParams), scale_(scale), bgImg_(bgImg), bgDownImg_(bgDownImg), img_(img) {
 	}
 
-	void Touch(const TouchInput &input) override;
+	bool Touch(const TouchInput &input) override;
 	void Draw(UIContext &dc) override;
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
 	virtual bool IsDown() { return pointerDownMask_ != 0; }
@@ -78,7 +83,7 @@ public:
 		: MultiTouchButton(key, bgImg, bgDownImg, img, scale, layoutParams), value_(value) {
 
 	}
-	void Touch(const TouchInput &input) override;
+	bool Touch(const TouchInput &input) override;
 	bool IsDown() override { return *value_; }
 
 	UI::Event OnChange;
@@ -92,7 +97,7 @@ public:
 	PSPButton(int pspButtonBit, const char *key, ImageID bgImg, ImageID bgDownImg, ImageID img, float scale, UI::LayoutParams *layoutParams)
 		: MultiTouchButton(key, bgImg, bgDownImg, img, scale, layoutParams), pspButtonBit_(pspButtonBit) {
 	}
-	void Touch(const TouchInput &input) override;
+	bool Touch(const TouchInput &input) override;
 	bool IsDown() override;
 
 private:
@@ -103,7 +108,7 @@ class PSPDpad : public GamepadView {
 public:
 	PSPDpad(ImageID arrowIndex, const char *key, ImageID arrowDownIndex, ImageID overlayIndex, float scale, float spacing, UI::LayoutParams *layoutParams);
 
-	void Touch(const TouchInput &input) override;
+	bool Touch(const TouchInput &input) override;
 	void Draw(UIContext &dc) override;
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
 
@@ -124,7 +129,7 @@ class PSPStick : public GamepadView {
 public:
 	PSPStick(ImageID bgImg, const char *key, ImageID stickImg, ImageID stickDownImg, int stick, float scale, UI::LayoutParams *layoutParams);
 
-	void Touch(const TouchInput &input) override;
+	bool Touch(const TouchInput &input) override;
 	void Draw(UIContext &dc) override;
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
 
@@ -149,7 +154,7 @@ class PSPCustomStick : public PSPStick {
 public:
 	PSPCustomStick(ImageID bgImg, const char *key, ImageID stickImg, ImageID stickDownImg, float scale, UI::LayoutParams *layoutParams);
 
-	void Touch(const TouchInput &input) override;
+	bool Touch(const TouchInput &input) override;
 	void Draw(UIContext &dc) override;
 
 private:
@@ -169,26 +174,29 @@ const int baseActionButtonSpacing = 60;
 
 class ComboKey : public MultiTouchButton {
 public:
-	ComboKey(uint64_t pspButtonBit, const char *key, bool toggle, ControlMapper* controllMapper, ImageID bgImg, ImageID bgDownImg, ImageID img, float scale, bool invertedContextDimension, UI::LayoutParams *layoutParams)
-		: MultiTouchButton(key, bgImg, bgDownImg, img, scale, layoutParams), pspButtonBit_(pspButtonBit), toggle_(toggle), controllMapper_(controllMapper), on_(false), invertedContextDimension_(invertedContextDimension) {
+	ComboKey(uint64_t pspButtonBit, const char *key, bool toggle, bool repeat, ControlMapper* controllMapper, ImageID bgImg, ImageID bgDownImg, ImageID img, float scale, bool invertedContextDimension, UI::LayoutParams *layoutParams)
+		: MultiTouchButton(key, bgImg, bgDownImg, img, scale, layoutParams), pspButtonBit_(pspButtonBit), toggle_(toggle), repeat_(repeat), controlMapper_(controllMapper), on_(false), invertedContextDimension_(invertedContextDimension) {
 	}
-	void Touch(const TouchInput &input) override;
+	bool Touch(const TouchInput &input) override;
+	void Update() override;
 	bool IsDown() override;
 
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
 private:
 	uint64_t pspButtonBit_;
 	bool toggle_;
-	ControlMapper* controllMapper_;
+	bool repeat_;
+	int pressedFrames_ = 0;
+	ControlMapper* controlMapper_;
 	bool on_;
 	bool invertedContextDimension_; // Swap width and height
 };
 
 class GestureGamepad : public UI::View {
 public:
-	GestureGamepad(ControlMapper* controllMapper) : controllMapper_(controllMapper) {};
+	GestureGamepad(ControlMapper* controllMapper) : controlMapper_(controllMapper) {};
 
-	void Touch(const TouchInput &input) override;
+	bool Touch(const TouchInput &input) override;
 	void Update() override;
 
 protected:
@@ -205,7 +213,7 @@ protected:
 	bool swipeUpReleased_ = true;
 	bool swipeDownReleased_ = true;
 	bool haveDoubleTapped_ = false;
-	ControlMapper* controllMapper_;
+	ControlMapper* controlMapper_;
 };
 
 // Just edit this to add new image, shape or button function
@@ -244,6 +252,13 @@ namespace CustomKey {
 		{ ImageID("I_ARROW"), 0.0f},
 		{ ImageID("I_ARROW"), 180.0f},
 		{ ImageID("I_GEAR"), 0.0f},
+		{ ImageID("I_ROTATE_LEFT"), 0.0f},
+		{ ImageID("I_ROTATE_RIGHT"), 0.0f},
+		{ ImageID("I_ARROW_LEFT"), 0.0f},
+		{ ImageID("I_ARROW_RIGHT"), 0.0f},
+		{ ImageID("I_ARROW_UP"), 0.0f},
+		{ ImageID("I_ARROW_DOWN"), 0.0f},
+		{ ImageID("I_THREE_DOTS"), 0.0f},
 	};
 
 	// Shape list
@@ -309,6 +324,10 @@ namespace CustomKey {
 #ifndef MOBILE_DEVICE
 		{ ImageID::invalid(), VIRTKEY_RECORD },
 #endif
+		{ ImageID::invalid(), VIRTKEY_AXIS_X_MIN },
+		{ ImageID::invalid(), VIRTKEY_AXIS_Y_MIN },
+		{ ImageID::invalid(), VIRTKEY_AXIS_X_MAX },
+		{ ImageID::invalid(), VIRTKEY_AXIS_Y_MAX },
 	};
 	static_assert(ARRAY_SIZE(comboKeyList) <= 64, "Too many key for a uint64_t bit mask");
 };
@@ -347,5 +366,9 @@ namespace GestureKey {
 #ifndef MOBILE_DEVICE
 		VIRTKEY_RECORD,
 #endif
+		VIRTKEY_AXIS_X_MIN,
+		VIRTKEY_AXIS_Y_MIN,
+		VIRTKEY_AXIS_X_MAX,
+		VIRTKEY_AXIS_Y_MAX,
 	};
 }

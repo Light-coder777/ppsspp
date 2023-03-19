@@ -10,6 +10,8 @@
 #include "Common/Data/Convert/SmallDataConvert.h"
 #include "Common/Math/math_util.h"
 #include "Common/Math/lin/matrix4x4.h"
+#include "Common/System/System.h"
+#include "Common/Log.h"
 #include "Common/GPU/thin3d.h"
 #include "Common/GPU/Shader.h"
 #include "Common/GPU/OpenGL/DataFormatGL.h"
@@ -175,10 +177,8 @@ public:
 	GLuint stencilZFail;
 	GLuint stencilPass;
 	GLuint stencilCompareOp;
-	uint8_t stencilCompareMask;
-	uint8_t stencilWriteMask;
 
-	void Apply(GLRenderManager *render, uint8_t stencilRef) {
+	void Apply(GLRenderManager *render, uint8_t stencilRef, uint8_t stencilWriteMask, uint8_t stencilCompareMask) {
 		render->SetDepth(depthTestEnabled, depthWriteEnabled, depthComp);
 		render->SetStencilFunc(stencilEnabled, stencilCompareOp, stencilRef, stencilCompareMask);
 		render->SetStencilOp(stencilWriteMask, stencilFail, stencilZFail, stencilPass);
@@ -212,7 +212,6 @@ GLuint ShaderStageToOpenGL(ShaderStage stage) {
 class OpenGLShaderModule : public ShaderModule {
 public:
 	OpenGLShaderModule(GLRenderManager *render, ShaderStage stage, const std::string &tag) : render_(render), stage_(stage), tag_(tag) {
-		DEBUG_LOG(G3D, "Shader module created (%p)", this);
 		glstage_ = ShaderStageToOpenGL(stage);
 	}
 
@@ -251,11 +250,20 @@ bool OpenGLShaderModule::Compile(GLRenderManager *render, ShaderLanguage languag
 		if (source_.find("#version") == source_.npos) {
 			source_ = ApplyGLSLPrelude(source_, glstage_);
 		}
+	} else {
+		// Unsupported shader type
+		return false;
 	}
 
 	shader_ = render->CreateShader(glstage_, source_, tag_);
+	_assert_(shader_ != nullptr);  // normally can't fail since we defer creation, unless there's a memory error or similar.
 	return true;
 }
+
+struct PipelineLocData : GLRProgramLocData {
+	GLint samplerLocs_[MAX_TEXTURE_SLOTS]{};
+	std::vector<GLint> dynamicUniformLocs_;
+};
 
 class OpenGLInputLayout : public InputLayout {
 public:
@@ -263,9 +271,6 @@ public:
 	~OpenGLInputLayout();
 
 	void Compile(const InputLayoutDesc &desc);
-	bool RequiresBuffer() {
-		return false;
-	}
 
 	GLRInputLayout *inputLayout_ = nullptr;
 	int stride = 0;
@@ -275,20 +280,18 @@ private:
 
 class OpenGLPipeline : public Pipeline {
 public:
-	OpenGLPipeline(GLRenderManager *render) : render_(render) {
-	}
+	OpenGLPipeline(GLRenderManager *render) : render_(render) {}
 	~OpenGLPipeline() {
 		for (auto &iter : shaders) {
 			iter->Release();
 		}
-		if (program_) render_->DeleteProgram(program_);
+		if (program_) {
+			render_->DeleteProgram(program_);
+		}
+		// DO NOT delete locs_ here, it's deleted by the render manager.
 	}
 
-	bool LinkShaders();
-
-	bool RequiresBuffer() override {
-		return inputLayout && inputLayout->RequiresBuffer();
-	}
+	bool LinkShaders(const PipelineDesc &desc);
 
 	GLuint prim = 0;
 	std::vector<OpenGLShaderModule *> shaders;
@@ -297,11 +300,17 @@ public:
 	AutoRef<OpenGLBlendState> blend;
 	AutoRef<OpenGLRasterState> raster;
 
+	// Not owned!
+	PipelineLocData *locs_ = nullptr;
+
 	// TODO: Optimize by getting the locations first and putting in a custom struct
 	UniformBufferDesc dynamicUniforms;
-	GLint samplerLocs_[MAX_TEXTURE_SLOTS]{};
-	std::vector<GLint> dynamicUniformLocs_;
 	GLRProgram *program_ = nullptr;
+
+
+	// Allow using other sampler names than sampler0, sampler1 etc in shaders.
+	// If not set, will default to those, though.
+	Slice<SamplerDef> samplers_;
 
 private:
 	GLRenderManager *render_;
@@ -313,7 +322,7 @@ class OpenGLTexture;
 class OpenGLContext : public DrawContext {
 public:
 	OpenGLContext();
-	virtual ~OpenGLContext();
+	~OpenGLContext();
 
 	void SetTargetSize(int w, int h) override {
 		DrawContext::SetTargetSize(w, h);
@@ -341,9 +350,9 @@ public:
 	BlendState *CreateBlendState(const BlendStateDesc &desc) override;
 	SamplerState *CreateSamplerState(const SamplerStateDesc &desc) override;
 	RasterState *CreateRasterState(const RasterStateDesc &desc) override;
-	Pipeline *CreateGraphicsPipeline(const PipelineDesc &desc) override;
+	Pipeline *CreateGraphicsPipeline(const PipelineDesc &desc, const char *tag) override;
 	InputLayout *CreateInputLayout(const InputLayoutDesc &desc) override;
-	ShaderModule *CreateShaderModule(ShaderStage stage, ShaderLanguage language, const uint8_t *data, size_t dataSize, const std::string &tag) override;
+	ShaderModule *CreateShaderModule(ShaderStage stage, ShaderLanguage language, const uint8_t *data, size_t dataSize, const char *tag) override;
 
 	Texture *CreateTexture(const TextureDesc &desc) override;
 	Buffer *CreateBuffer(size_t size, uint32_t usageFlags) override;
@@ -356,14 +365,11 @@ public:
 
 	void CopyFramebufferImage(Framebuffer *src, int level, int x, int y, int z, Framebuffer *dst, int dstLevel, int dstX, int dstY, int dstZ, int width, int height, int depth, int channelBits, const char *tag) override;
 	bool BlitFramebuffer(Framebuffer *src, int srcX1, int srcY1, int srcX2, int srcY2, Framebuffer *dst, int dstX1, int dstY1, int dstX2, int dstY2, int channelBits, FBBlitFilter filter, const char *tag) override;
-	bool CopyFramebufferToMemorySync(Framebuffer *src, int channelBits, int x, int y, int w, int h, Draw::DataFormat format, void *pixels, int pixelStride, const char *tag) override;
+	bool CopyFramebufferToMemory(Framebuffer *src, int channelBits, int x, int y, int w, int h, Draw::DataFormat format, void *pixels, int pixelStride, ReadbackMode mode, const char *tag) override;
 
 	// These functions should be self explanatory.
 	void BindFramebufferAsRenderTarget(Framebuffer *fbo, const RenderPassInfo &rp, const char *tag) override;
-	Framebuffer *GetCurrentRenderTarget() override {
-		return curRenderTarget_;
-	}
-	void BindFramebufferAsTexture(Framebuffer *fbo, int binding, FBChannel channelBit, int attachment) override;
+	void BindFramebufferAsTexture(Framebuffer *fbo, int binding, FBChannel channelBit, int layer) override;
 
 	void GetFramebufferDimensions(Framebuffer *fbo, int *w, int *h) override;
 
@@ -379,25 +385,35 @@ public:
 		renderManager_.SetScissor({ left, top, width, height });
 	}
 
-	void SetViewports(int count, Viewport *viewports) override {
+	void SetViewport(const Viewport &viewport) override {
 		// Same structure, different name.
-		renderManager_.SetViewport((GLRViewport &)*viewports);
+		renderManager_.SetViewport((GLRViewport &)viewport);
 	}
 
 	void SetBlendFactor(float color[4]) override {
 		renderManager_.SetBlendFactor(color);
 	}
 
-	void SetStencilRef(uint8_t ref) override {
-		stencilRef_ = ref;
+	void SetStencilParams(uint8_t refValue, uint8_t writeMask, uint8_t compareMask) override {
+		stencilRef_ = refValue;
+		stencilWriteMask_ = writeMask;
+		stencilCompareMask_ = compareMask;
+		// Do we need to update on the fly here?
 		renderManager_.SetStencilFunc(
 			curPipeline_->depthStencil->stencilEnabled,
 			curPipeline_->depthStencil->stencilCompareOp,
-			ref,
-			curPipeline_->depthStencil->stencilCompareMask);
+			refValue,
+			compareMask);
+		renderManager_.SetStencilOp(
+			writeMask,
+			curPipeline_->depthStencil->stencilFail,
+			curPipeline_->depthStencil->stencilZFail,
+			curPipeline_->depthStencil->stencilPass);
 	}
 
-	void BindTextures(int start, int count, Texture **textures) override;
+	void BindTextures(int start, int count, Texture **textures, TextureBindFlags flags) override;
+	void BindNativeTexture(int sampler, void *nativeTexture) override;
+
 	void BindPipeline(Pipeline *pipeline) override;
 	void BindVertexBuffers(int start, int count, Buffer **buffers, const int *offsets) override {
 		_assert_(start + count <= ARRAY_SIZE(curVBuffers_));
@@ -453,22 +469,15 @@ public:
 		}
 	}
 
-	uint64_t GetNativeObject(NativeObject obj) override {
-		switch (obj) {
-		case NativeObject::RENDER_MANAGER:
-			return (uint64_t)(uintptr_t)&renderManager_;
-		default:
-			return 0;
-		}
-	}
+	uint64_t GetNativeObject(NativeObject obj, void *srcObject) override;
 
 	void HandleEvent(Event ev, int width, int height, void *param1, void *param2) override {}
 
-	int GetCurrentStepId() const override {
-		return renderManager_.GetCurrentStepId();
-	}
+	void Invalidate(InvalidationFlags flags) override;
 
-	void InvalidateCachedState() override;
+	void SetInvalidationCallback(InvalidationCallback callback) override {
+		renderManager_.SetInvalidationCallback(callback);
+	}
 
 private:
 	void ApplySamplers();
@@ -491,6 +500,8 @@ private:
 	AutoRef<Framebuffer> curRenderTarget_;
 
 	uint8_t stencilRef_ = 0;
+	uint8_t stencilWriteMask_ = 0;
+	uint8_t stencilCompareMask_ = 0;
 
 	// Frames in flight is not such a strict concept as with Vulkan until we start using glBufferStorage and fences.
 	// But might as well have the structure ready, and can't hurt to rotate buffers.
@@ -504,7 +515,7 @@ static constexpr int MakeIntelSimpleVer(int v1, int v2, int v3) {
 	return (v1 << 16) | (v2 << 8) | v3;
 }
 
-static bool HasIntelDualSrcBug(int versions[4]) {
+static bool HasIntelDualSrcBug(const int versions[4]) {
 	// Intel uses a confusing set of at least 3 version numbering schemes.  This is the one given to OpenGL.
 	switch (MakeIntelSimpleVer(versions[0], versions[1], versions[2])) {
 	case MakeIntelSimpleVer(9, 17, 10):
@@ -521,19 +532,39 @@ static bool HasIntelDualSrcBug(int versions[4]) {
 }
 
 OpenGLContext::OpenGLContext() {
-	// TODO: Detect more caps
 	if (gl_extensions.IsGLES) {
 		if (gl_extensions.OES_packed_depth_stencil || gl_extensions.OES_depth24) {
 			caps_.preferredDepthBufferFormat = DataFormat::D24_S8;
 		} else {
 			caps_.preferredDepthBufferFormat = DataFormat::D16;
 		}
+		if (gl_extensions.GLES3) {
+			// Mali reports 30 but works fine...
+			if (gl_extensions.range[1][5][1] >= 30) {
+				caps_.fragmentShaderInt32Supported = true;
+			}
+		}
+		caps_.texture3DSupported = gl_extensions.OES_texture_3D;
+		caps_.textureDepthSupported = gl_extensions.GLES3 || gl_extensions.OES_depth_texture;
 	} else {
+		if (gl_extensions.VersionGEThan(3, 3, 0)) {
+			caps_.fragmentShaderInt32Supported = true;
+		}
 		caps_.preferredDepthBufferFormat = DataFormat::D24_S8;
+		caps_.texture3DSupported = true;
+		caps_.textureDepthSupported = true;
 	}
-	caps_.framebufferBlitSupported = gl_extensions.NV_framebuffer_blit || gl_extensions.ARB_framebuffer_object;
+
+	caps_.dualSourceBlend = gl_extensions.ARB_blend_func_extended || gl_extensions.EXT_blend_func_extended;
+	caps_.anisoSupported = gl_extensions.EXT_texture_filter_anisotropic;
+	caps_.framebufferCopySupported = gl_extensions.OES_copy_image || gl_extensions.NV_copy_image || gl_extensions.EXT_copy_image || gl_extensions.ARB_copy_image;
+	caps_.framebufferBlitSupported = gl_extensions.NV_framebuffer_blit || gl_extensions.ARB_framebuffer_object || gl_extensions.GLES3;
 	caps_.framebufferDepthBlitSupported = caps_.framebufferBlitSupported;
-	caps_.depthClampSupported = gl_extensions.ARB_depth_clamp;
+	caps_.framebufferStencilBlitSupported = caps_.framebufferBlitSupported;
+	caps_.depthClampSupported = gl_extensions.ARB_depth_clamp || gl_extensions.EXT_depth_clamp;
+	caps_.blendMinMaxSupported = gl_extensions.EXT_blend_minmax;
+	caps_.multiSampleLevelsMask = 1;  // More could be supported with some work.
+
 	if (gl_extensions.IsGLES) {
 		caps_.clipDistanceSupported = gl_extensions.EXT_clip_cull_distance || gl_extensions.APPLE_clip_distance;
 		caps_.cullDistanceSupported = gl_extensions.EXT_clip_cull_distance;
@@ -541,6 +572,21 @@ OpenGLContext::OpenGLContext() {
 		caps_.clipDistanceSupported = gl_extensions.VersionGEThan(3, 0);
 		caps_.cullDistanceSupported = gl_extensions.ARB_cull_distance;
 	}
+	caps_.textureNPOTFullySupported =
+		(!gl_extensions.IsGLES && gl_extensions.VersionGEThan(2, 0, 0)) ||
+		gl_extensions.IsCoreContext || gl_extensions.GLES3 ||
+		gl_extensions.ARB_texture_non_power_of_two || gl_extensions.OES_texture_npot;
+
+	if (gl_extensions.IsGLES) {
+		caps_.fragmentShaderDepthWriteSupported = gl_extensions.GLES3;
+		// There's also GL_EXT_frag_depth but it's rare along with 2.0. Most chips that support it are simply 3.0 chips.
+	} else {
+		caps_.fragmentShaderDepthWriteSupported = true;
+	}
+	caps_.fragmentShaderStencilWriteSupported = gl_extensions.ARB_shader_stencil_export;
+
+	// GLES has no support for logic framebuffer operations. There doesn't even seem to exist any such extensions.
+	caps_.logicOpSupported = !gl_extensions.IsGLES;
 
 	// Interesting potential hack for emulating GL_DEPTH_CLAMP (use a separate varying, force depth in fragment shader):
 	// This will induce a performance penalty on many architectures though so a blanket enable of this
@@ -562,6 +608,18 @@ OpenGLContext::OpenGLContext() {
 		caps_.vendor = GPUVendor::VENDOR_UNKNOWN;
 		break;
 	}
+
+	// Hide D3D9 when we know it likely won't work well.
+#if PPSSPP_PLATFORM(WINDOWS)
+	caps_.supportsD3D9 = true;
+	if (!strcmp(gl_extensions.model, "Intel(R) Iris(R) Xe Graphics")) {
+		caps_.supportsD3D9 = false;
+	}
+#endif
+
+	// Very rough heuristic!
+	caps_.isTilingGPU = gl_extensions.IsGLES && caps_.vendor != GPUVendor::VENDOR_NVIDIA && caps_.vendor != GPUVendor::VENDOR_INTEL;
+
 	for (int i = 0; i < GLRenderManager::MAX_INFLIGHT_FRAMES; i++) {
 		frameData_[i].push = renderManager_.CreatePushBuffer(i, GL_ARRAY_BUFFER, 64 * 1024);
 	}
@@ -582,6 +640,12 @@ OpenGLContext::OpenGLContext() {
 		}
 	}
 
+#if PPSSPP_ARCH(ARMV7)
+	if (caps_.vendor == GPUVendor::VENDOR_BROADCOM) {
+		bugs_.Infest(Bugs::RASPBERRY_SHADER_COMP_HANG);
+	}
+#endif
+
 	// Try to detect old Tegra chips by checking for sub 3.0 GL versions. Like Vivante and Broadcom,
 	// those can't handle NaN values in conditionals.
 	if (caps_.vendor == GPUVendor::VENDOR_VIVANTE ||
@@ -600,6 +664,15 @@ OpenGLContext::OpenGLContext() {
 		// See https://github.com/hrydgard/ppsspp/commit/8974cd675e538f4445955e3eac572a9347d84232
 		// TODO: Should this workaround be removed for newer devices/drivers?
 		bugs_.Infest(Bugs::PVR_GENMIPMAP_HEIGHT_GREATER);
+	}
+
+	if (caps_.vendor == GPUVendor::VENDOR_QUALCOMM) {
+#if PPSSPP_PLATFORM(ANDROID)
+		// The bug seems to affect Adreno 3xx and 5xx, and appeared in Android 8.0 Oreo, so API 26.
+		// See https://github.com/hrydgard/ppsspp/issues/16015#issuecomment-1328316080.
+		if (gl_extensions.modelNumber < 600 && System_GetPropertyInt(SYSPROP_SYSTEMVERSION) >= 26)
+			bugs_.Infest(Bugs::ADRENO_RESOURCE_DEADLOCK);
+#endif
 	}
 
 #if PPSSPP_PLATFORM(IOS)
@@ -622,6 +695,7 @@ OpenGLContext::OpenGLContext() {
 			shaderLanguageDesc_.shaderLanguage = ShaderLanguage::GLSL_3xx;
 			shaderLanguageDesc_.fragColor0 = "fragColor0";
 			shaderLanguageDesc_.texture = "texture";
+			shaderLanguageDesc_.texture3D = "texture";
 			shaderLanguageDesc_.glslES30 = true;
 			shaderLanguageDesc_.bitwiseOps = true;
 			shaderLanguageDesc_.texelFetch = "texelFetch";
@@ -645,6 +719,7 @@ OpenGLContext::OpenGLContext() {
 			shaderLanguageDesc_.shaderLanguage = ShaderLanguage::GLSL_3xx;
 			shaderLanguageDesc_.fragColor0 = "fragColor0";
 			shaderLanguageDesc_.texture = "texture";
+			shaderLanguageDesc_.texture3D = "texture";
 			shaderLanguageDesc_.glslES30 = true;
 			shaderLanguageDesc_.bitwiseOps = true;
 			shaderLanguageDesc_.texelFetch = "texelFetch";
@@ -655,6 +730,7 @@ OpenGLContext::OpenGLContext() {
 			shaderLanguageDesc_.shaderLanguage = ShaderLanguage::GLSL_1xx;
 			shaderLanguageDesc_.fragColor0 = "fragColor0";
 			shaderLanguageDesc_.texture = "texture";
+			shaderLanguageDesc_.texture3D = "texture";
 			shaderLanguageDesc_.bitwiseOps = true;
 			shaderLanguageDesc_.texelFetch = "texelFetch";
 			shaderLanguageDesc_.varying_vs = "out";
@@ -670,8 +746,10 @@ OpenGLContext::OpenGLContext() {
 		}
 	}
 
-	if (gl_extensions.IsGLES) {
+	// NOTE: We only support framebuffer fetch on ES3 due to past issues..
+	if (gl_extensions.IsGLES && gl_extensions.GLES3) {
 		caps_.framebufferFetchSupported = (gl_extensions.EXT_shader_framebuffer_fetch || gl_extensions.ARM_shader_framebuffer_fetch);
+
 		if (gl_extensions.EXT_shader_framebuffer_fetch) {
 			shaderLanguageDesc_.framebufferFetchExtension = "#extension GL_EXT_shader_framebuffer_fetch : require";
 			shaderLanguageDesc_.lastFragData = gl_extensions.GLES3 ? "fragColor0" : "gl_LastFragData[0]";
@@ -680,10 +758,13 @@ OpenGLContext::OpenGLContext() {
 			shaderLanguageDesc_.lastFragData = "gl_LastFragColorARM";
 		}
 	}
+
+	renderManager_.SetDeviceCaps(caps_);
 }
 
 OpenGLContext::~OpenGLContext() {
 	DestroyPresets();
+
 	for (int i = 0; i < GLRenderManager::MAX_INFLIGHT_FRAMES; i++) {
 		renderManager_.DeletePushBuffer(frameData_[i].push);
 	}
@@ -700,18 +781,20 @@ void OpenGLContext::EndFrame() {
 	renderManager_.EndPushBuffer(frameData.push);  // upload the data!
 	renderManager_.Finish();
 
-	InvalidateCachedState();
+	Invalidate(InvalidationFlags::CACHED_RENDER_STATE);
 }
 
-void OpenGLContext::InvalidateCachedState() {
-	// Unbind stuff.
-	for (auto &texture : boundTextures_) {
-		texture = nullptr;
+void OpenGLContext::Invalidate(InvalidationFlags flags) {
+	if (flags & InvalidationFlags::CACHED_RENDER_STATE) {
+		// Unbind stuff.
+		for (auto &texture : boundTextures_) {
+			texture = nullptr;
+		}
+		for (auto &sampler : boundSamplers_) {
+			sampler = nullptr;
+		}
+		curPipeline_ = nullptr;
 	}
-	for (auto &sampler : boundSamplers_) {
-		sampler = nullptr;
-	}
-	curPipeline_ = nullptr;
 }
 
 InputLayout *OpenGLContext::CreateInputLayout(const InputLayoutDesc &desc) {
@@ -778,18 +861,21 @@ OpenGLTexture::OpenGLTexture(GLRenderManager *render, const TextureDesc &desc) :
 	format_ = desc.format;
 	type_ = desc.type;
 	GLenum target = TypeToTarget(desc.type);
-	tex_ = render->CreateTexture(target, desc.width, desc.height, desc.mipLevels);
+	tex_ = render->CreateTexture(target, desc.width, desc.height, 1, desc.mipLevels);
 
 	mipLevels_ = desc.mipLevels;
 	if (desc.initData.empty())
 		return;
 
 	int level = 0;
+	int width = width_;
+	int height = height_;
+	int depth = depth_;
 	for (auto data : desc.initData) {
-		SetImageData(0, 0, 0, width_, height_, depth_, level, 0, data, desc.initDataCallback);
-		width_ = (width_ + 1) / 2;
-		height_ = (height_ + 1) / 2;
-		depth_ = (depth_ + 1) / 2;
+		SetImageData(0, 0, 0, width, height, depth, level, 0, data, desc.initDataCallback);
+		width = (width + 1) / 2;
+		height = (height + 1) / 2;
+		depth = (depth + 1) / 2;
 		level++;
 	}
 	mipLevels_ = desc.generateMips ? desc.mipLevels : level;
@@ -863,7 +949,7 @@ void OpenGLTexture::SetImageData(int x, int y, int z, int width, int height, int
 		}
 	}
 
-	render_->TextureImage(tex_, level, width, height, format_, texData);
+	render_->TextureImage(tex_, level, width, height, depth, format_, texData);
 }
 
 #ifdef DEBUG_READ_PIXELS
@@ -902,7 +988,7 @@ static void LogReadPixelsError(GLenum error) {
 }
 #endif
 
-bool OpenGLContext::CopyFramebufferToMemorySync(Framebuffer *src, int channelBits, int x, int y, int w, int h, Draw::DataFormat dataFormat, void *pixels, int pixelStride, const char *tag) {
+bool OpenGLContext::CopyFramebufferToMemory(Framebuffer *src, int channelBits, int x, int y, int w, int h, Draw::DataFormat dataFormat, void *pixels, int pixelStride, ReadbackMode mode, const char *tag) {
 	if (gl_extensions.IsGLES && (channelBits & FB_COLOR_BIT) == 0) {
 		// Can't readback depth or stencil on GLES.
 		return false;
@@ -915,8 +1001,7 @@ bool OpenGLContext::CopyFramebufferToMemorySync(Framebuffer *src, int channelBit
 		aspect |= GL_DEPTH_BUFFER_BIT;
 	if (channelBits & FB_STENCIL_BIT)
 		aspect |= GL_STENCIL_BUFFER_BIT;
-	renderManager_.CopyFramebufferToMemorySync(fb ? fb->framebuffer_ : nullptr, aspect, x, y, w, h, dataFormat, (uint8_t *)pixels, pixelStride, tag);
-	return true;
+	return renderManager_.CopyFramebufferToMemory(fb ? fb->framebuffer_ : nullptr, aspect, x, y, w, h, dataFormat, (uint8_t *)pixels, pixelStride, mode, tag);
 }
 
 
@@ -930,12 +1015,10 @@ DepthStencilState *OpenGLContext::CreateDepthStencilState(const DepthStencilStat
 	ds->depthWriteEnabled = desc.depthWriteEnabled;
 	ds->depthComp = compToGL[(int)desc.depthCompare];
 	ds->stencilEnabled = desc.stencilEnabled;
-	ds->stencilCompareOp = compToGL[(int)desc.front.compareOp];
-	ds->stencilPass = stencilOpToGL[(int)desc.front.passOp];
-	ds->stencilFail = stencilOpToGL[(int)desc.front.failOp];
-	ds->stencilZFail = stencilOpToGL[(int)desc.front.depthFailOp];
-	ds->stencilWriteMask = desc.front.writeMask;
-	ds->stencilCompareMask = desc.front.compareMask;
+	ds->stencilCompareOp = compToGL[(int)desc.stencil.compareOp];
+	ds->stencilPass = stencilOpToGL[(int)desc.stencil.passOp];
+	ds->stencilFail = stencilOpToGL[(int)desc.stencil.failOp];
+	ds->stencilZFail = stencilOpToGL[(int)desc.stencil.depthFailOp];
 	return ds;
 }
 
@@ -1007,7 +1090,7 @@ public:
 		buffer_ = render->CreateBuffer(target_, size, usage_);
 		totalSize_ = size;
 	}
-	~OpenGLBuffer() override {
+	~OpenGLBuffer() {
 		render_->DeleteBuffer(buffer_);
 	}
 
@@ -1037,7 +1120,7 @@ void OpenGLContext::UpdateBuffer(Buffer *buffer, const uint8_t *data, size_t off
 	renderManager_.BufferSubdata(buf->buffer_, offset, size, dataCopy);
 }
 
-Pipeline *OpenGLContext::CreateGraphicsPipeline(const PipelineDesc &desc) {
+Pipeline *OpenGLContext::CreateGraphicsPipeline(const PipelineDesc &desc, const char *tag) {
 	if (!desc.shaders.size()) {
 		ERROR_LOG(G3D,  "Pipeline requires at least one shader");
 		return nullptr;
@@ -1057,16 +1140,19 @@ Pipeline *OpenGLContext::CreateGraphicsPipeline(const PipelineDesc &desc) {
 			iter->AddRef();
 			pipeline->shaders.push_back(static_cast<OpenGLShaderModule *>(iter));
 		} else {
-			ERROR_LOG(G3D,  "ERROR: Tried to create graphics pipeline with a null shader module");
+			ERROR_LOG(G3D,  "ERROR: Tried to create graphics pipeline %s with a null shader module", tag ? tag : "no tag");
 			delete pipeline;
 			return nullptr;
 		}
 	}
+
 	if (desc.uniformDesc) {
 		pipeline->dynamicUniforms = *desc.uniformDesc;
-		pipeline->dynamicUniformLocs_.resize(desc.uniformDesc->uniforms.size());
 	}
-	if (pipeline->LinkShaders()) {
+
+	pipeline->samplers_ = desc.samplers;
+	if (pipeline->LinkShaders(desc)) {
+		_assert_((u32)desc.prim < ARRAY_SIZE(primToGL));
 		// Build the rest of the virtual pipeline object.
 		pipeline->prim = primToGL[(int)desc.prim];
 		pipeline->depthStencil = (OpenGLDepthStencilState *)desc.depthStencil;
@@ -1075,13 +1161,13 @@ Pipeline *OpenGLContext::CreateGraphicsPipeline(const PipelineDesc &desc) {
 		pipeline->inputLayout = (OpenGLInputLayout *)desc.inputLayout;
 		return pipeline;
 	} else {
-		ERROR_LOG(G3D,  "Failed to create pipeline - shaders failed to link");
+		ERROR_LOG(G3D,  "Failed to create pipeline %s - shaders failed to link", tag ? tag : "no tag");
 		delete pipeline;
 		return nullptr;
 	}
 }
 
-void OpenGLContext::BindTextures(int start, int count, Texture **textures) {
+void OpenGLContext::BindTextures(int start, int count, Texture **textures, TextureBindFlags flags) {
 	_assert_(start + count <= MAX_TEXTURE_SLOTS);
 	for (int i = start; i < start + count; i++) {
 		OpenGLTexture *glTex = static_cast<OpenGLTexture *>(textures[i - start]);
@@ -1095,12 +1181,18 @@ void OpenGLContext::BindTextures(int start, int count, Texture **textures) {
 	}
 }
 
+void OpenGLContext::BindNativeTexture(int index, void *nativeTexture) {
+	GLRTexture *tex = (GLRTexture *)nativeTexture;
+	boundTextures_[index] = tex;
+	renderManager_.BindTexture(index, tex);
+}
+
 void OpenGLContext::ApplySamplers() {
 	for (int i = 0; i < MAX_TEXTURE_SLOTS; i++) {
 		const OpenGLSamplerState *samp = boundSamplers_[i];
 		const GLRTexture *tex = boundTextures_[i];
 		if (tex) {
-			_assert_(samp);
+			_assert_msg_(samp, "Sampler missing");
 		} else {
 			continue;
 		}
@@ -1120,7 +1212,7 @@ void OpenGLContext::ApplySamplers() {
 	}
 }
 
-ShaderModule *OpenGLContext::CreateShaderModule(ShaderStage stage, ShaderLanguage language, const uint8_t *data, size_t dataSize, const std::string &tag) {
+ShaderModule *OpenGLContext::CreateShaderModule(ShaderStage stage, ShaderLanguage language, const uint8_t *data, size_t dataSize, const char *tag) {
 	OpenGLShaderModule *shader = new OpenGLShaderModule(&renderManager_, stage, tag);
 	if (shader->Compile(&renderManager_, language, data, dataSize)) {
 		return shader;
@@ -1130,7 +1222,7 @@ ShaderModule *OpenGLContext::CreateShaderModule(ShaderStage stage, ShaderLanguag
 	}
 }
 
-bool OpenGLPipeline::LinkShaders() {
+bool OpenGLPipeline::LinkShaders(const PipelineDesc &desc) {
 	std::vector<GLRShader *> linkShaders;
 	for (auto shaderModule : shaders) {
 		if (shaderModule) {
@@ -1148,9 +1240,11 @@ bool OpenGLPipeline::LinkShaders() {
 	}
 
 	std::vector<GLRProgram::Semantic> semantics;
+	semantics.reserve(8);
 	// Bind all the common vertex data points. Mismatching ones will be ignored.
 	semantics.push_back({ SEM_POSITION, "Position" });
 	semantics.push_back({ SEM_COLOR0, "Color0" });
+	semantics.push_back({ SEM_COLOR1, "Color1" });
 	semantics.push_back({ SEM_TEXCOORD0, "TexCoord0" });
 	semantics.push_back({ SEM_NORMAL, "Normal" });
 	semantics.push_back({ SEM_TANGENT, "Tangent" });
@@ -1158,18 +1252,39 @@ bool OpenGLPipeline::LinkShaders() {
 	// For postshaders.
 	semantics.push_back({ SEM_POSITION, "a_position" });
 	semantics.push_back({ SEM_TEXCOORD0, "a_texcoord0" });
+
+	locs_ = new PipelineLocData();
+	locs_->dynamicUniformLocs_.resize(desc.uniformDesc->uniforms.size());
+
 	std::vector<GLRProgram::UniformLocQuery> queries;
-	queries.push_back({ &samplerLocs_[0], "sampler0" });
-	queries.push_back({ &samplerLocs_[1], "sampler1" });
-	queries.push_back({ &samplerLocs_[2], "sampler2" });
-	_assert_(queries.size() >= MAX_TEXTURE_SLOTS);
+	int samplersToCheck;
+	if (!samplers_.is_empty()) {
+		for (int i = 0; i < (int)std::min((const uint32_t)samplers_.size(), MAX_TEXTURE_SLOTS); i++) {
+			queries.push_back({ &locs_->samplerLocs_[i], samplers_[i].name, true });
+		}
+		samplersToCheck = (int)samplers_.size();
+	} else {
+		queries.push_back({ &locs_->samplerLocs_[0], "sampler0" });
+		queries.push_back({ &locs_->samplerLocs_[1], "sampler1" });
+		queries.push_back({ &locs_->samplerLocs_[2], "sampler2" });
+		samplersToCheck = 3;
+	}
+
+	_assert_(queries.size() <= MAX_TEXTURE_SLOTS);
 	for (size_t i = 0; i < dynamicUniforms.uniforms.size(); ++i) {
-		queries.push_back({ &dynamicUniformLocs_[i], dynamicUniforms.uniforms[i].name });
+		queries.push_back({ &locs_->dynamicUniformLocs_[i], dynamicUniforms.uniforms[i].name });
 	}
 	std::vector<GLRProgram::Initializer> initialize;
-	for (int i = 0; i < MAX_TEXTURE_SLOTS; ++i)
-		initialize.push_back({ &samplerLocs_[i], 0, i });
-	program_ = render_->CreateProgram(linkShaders, semantics, queries, initialize, false, false);
+	for (int i = 0; i < MAX_TEXTURE_SLOTS; ++i) {
+		if (i < samplersToCheck) {
+			initialize.push_back({ &locs_->samplerLocs_[i], 0, i });
+		} else {
+			locs_->samplerLocs_[i] = -1;
+		}
+	}
+
+	GLRProgramFlags flags{};
+	program_ = render_->CreateProgram(linkShaders, semantics, queries, initialize, locs_, flags);
 	return true;
 }
 
@@ -1179,7 +1294,7 @@ void OpenGLContext::BindPipeline(Pipeline *pipeline) {
 		return;
 	}
 	curPipeline_->blend->Apply(&renderManager_);
-	curPipeline_->depthStencil->Apply(&renderManager_, stencilRef_);
+	curPipeline_->depthStencil->Apply(&renderManager_, stencilRef_, stencilWriteMask_, stencilCompareMask_);
 	curPipeline_->raster->Apply(&renderManager_);
 	renderManager_.BindProgram(curPipeline_->program_);
 }
@@ -1191,7 +1306,7 @@ void OpenGLContext::UpdateDynamicUniformBuffer(const void *ub, size_t size) {
 
 	for (size_t i = 0; i < curPipeline_->dynamicUniforms.uniforms.size(); ++i) {
 		const auto &uniform = curPipeline_->dynamicUniforms.uniforms[i];
-		const GLint &loc = curPipeline_->dynamicUniformLocs_[i];
+		const GLint &loc = curPipeline_->locs_->dynamicUniformLocs_[i];
 		const float *data = (const float *)((uint8_t *)ub + uniform.offset);
 		switch (uniform.type) {
 		case UniformType::FLOAT1:
@@ -1318,6 +1433,9 @@ void OpenGLInputLayout::Compile(const InputLayoutDesc &desc) {
 Framebuffer *OpenGLContext::CreateFramebuffer(const FramebufferDesc &desc) {
 	CheckGLExtensions();
 
+	// TODO: Support multiview later. (It's our only use case for multi layers).
+	_dbg_assert_(desc.numLayers == 1);
+
 	GLRFramebuffer *framebuffer = renderManager_.CreateFramebuffer(desc.width, desc.height, desc.z_stencil);
 	OpenGLFramebuffer *fbo = new OpenGLFramebuffer(&renderManager_, framebuffer);
 	return fbo;
@@ -1364,7 +1482,7 @@ bool OpenGLContext::BlitFramebuffer(Framebuffer *fbsrc, int srcX1, int srcY1, in
 	return true;
 }
 
-void OpenGLContext::BindFramebufferAsTexture(Framebuffer *fbo, int binding, FBChannel channelBit, int color) {
+void OpenGLContext::BindFramebufferAsTexture(Framebuffer *fbo, int binding, FBChannel channelBit, int layer) {
 	OpenGLFramebuffer *fb = (OpenGLFramebuffer *)fbo;
 	_assert_(binding < MAX_TEXTURE_SLOTS);
 
@@ -1381,7 +1499,7 @@ void OpenGLContext::BindFramebufferAsTexture(Framebuffer *fbo, int binding, FBCh
 		aspect |= GL_STENCIL_BUFFER_BIT;
 		boundTextures_[binding] = &fb->framebuffer_->z_stencil_texture;
 	}
-	renderManager_.BindFramebufferAsTexture(fb->framebuffer_, binding, aspect, color);
+	renderManager_.BindFramebufferAsTexture(fb->framebuffer_, binding, aspect);
 }
 
 void OpenGLContext::GetFramebufferDimensions(Framebuffer *fbo, int *w, int *h) {
@@ -1392,6 +1510,17 @@ void OpenGLContext::GetFramebufferDimensions(Framebuffer *fbo, int *w, int *h) {
 	} else {
 		*w = targetWidth_;
 		*h = targetHeight_;
+	}
+}
+
+uint64_t OpenGLContext::GetNativeObject(NativeObject obj, void *srcObject) {
+	switch (obj) {
+	case NativeObject::RENDER_MANAGER:
+		return (uint64_t)(uintptr_t)&renderManager_;
+	case NativeObject::TEXTURE_VIEW:  // Gets the GLRTexture *
+		return (uint64_t)(((OpenGLTexture *)srcObject)->GetTex());
+	default:
+		return 0;
 	}
 }
 
@@ -1415,11 +1544,35 @@ uint32_t OpenGLContext::GetDataFormatSupport(DataFormat fmt) const {
 		return FMT_INPUTLAYOUT;
 
 	case DataFormat::R8_UNORM:
-		return 0;
+		return FMT_TEXTURE;
+	case DataFormat::R16_UNORM:
+		if (!gl_extensions.IsGLES) {
+			return FMT_TEXTURE;
+		} else {
+			return 0;
+		}
+		break;
+
 	case DataFormat::BC1_RGBA_UNORM_BLOCK:
 	case DataFormat::BC2_UNORM_BLOCK:
 	case DataFormat::BC3_UNORM_BLOCK:
-		return FMT_TEXTURE;
+		return gl_extensions.supportsBC123 ? FMT_TEXTURE : 0;
+
+	case DataFormat::BC4_UNORM_BLOCK:
+	case DataFormat::BC5_UNORM_BLOCK:
+		return gl_extensions.supportsBC45 ? FMT_TEXTURE : 0;
+
+	case DataFormat::BC7_UNORM_BLOCK:
+		return gl_extensions.supportsBC7 ? FMT_TEXTURE : 0;
+
+	case DataFormat::ASTC_4x4_UNORM_BLOCK:
+		return gl_extensions.supportsASTC ? FMT_TEXTURE : 0;
+
+	case DataFormat::ETC2_R8G8B8_UNORM_BLOCK:
+	case DataFormat::ETC2_R8G8B8A1_UNORM_BLOCK:
+	case DataFormat::ETC2_R8G8B8A8_UNORM_BLOCK:
+		return gl_extensions.supportsETC2 ? FMT_TEXTURE : 0;
+
 	default:
 		return 0;
 	}

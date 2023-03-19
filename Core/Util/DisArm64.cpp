@@ -120,14 +120,14 @@ void DecodeBitMasks(int immN, int imms, int immr, uint64_t *tmask, uint64_t *wma
 	// if len < 1 then ReservedValue();
 	// assert M >= (1 << len);
 	// Determine S, R and S - R parameters
-	int levels = Ones(len);
+	int levels = (int)Ones(len);
 	uint32_t S = imms & levels;
 	uint32_t R = immr & levels;
 	int diff = S - R; // 6-bit subtract with borrow
 	int esize = 1 << len;
 	int d = diff & Ones(len - 1);
-	uint32_t welem = Ones(S + 1);
-	uint32_t telem = Ones(d + 1);
+	uint32_t welem = (uint32_t)Ones(S + 1);
+	uint32_t telem = (uint32_t)Ones(d + 1);
 	if (wmask) {
 		uint64_t rotated = ROR(welem, R, esize);
 		*wmask = Replicate(rotated, esize);
@@ -206,7 +206,7 @@ static const char *GetSystemRegName(int o0, int op1, int CRn, int CRm, int op2) 
 }
 
 static void BranchExceptionAndSystem(uint32_t w, uint64_t addr, Instruction *instr, SymbolCallback symbolCallback) {
-	char buffer[128];
+	char buffer[125];
 	int Rt = w & 0x1f;
 	int Rn = (w >> 5) & 0x1f;
 	if (((w >> 26) & 0x1F) == 5) {
@@ -421,14 +421,14 @@ static void DataProcessingRegister(uint32_t w, uint64_t addr, Instruction *instr
 		const char *op = opcode2 >= 8 ? "unk" : opname[opcode];
 		snprintf(instr->text, sizeof(instr->text), "%s %c%d, %c%d", op, r, Rd, r, Rn);
 	} else if (((w >> 21) & 0x2FF) == 0x0D6) {
-		const char *opname[32] = {
+		const char *opname[64] = {
 			0, 0, "udiv", "sdiv", 0, 0, 0, 0,
 			"lslv", "lsrv", "asrv", "rorv", 0, 0, 0, 0,
 			"crc32b", "crc32h", "crc32w", 0, "crc32cb", "crc32ch", "crc32cw", 0,
 		};
 		int opcode = (w >> 10) & 0x3F;
 		// Data processing (2 source)
-		snprintf(instr->text, sizeof(instr->text), "%s %c%d, %c%d, %c%d", opname[opcode], r, Rd, r, Rn, r, Rm);
+		snprintf(instr->text, sizeof(instr->text), "%s %c%d, %c%d, %c%d", opname[opcode] ? opname[opcode] : "?", r, Rd, r, Rn, r, Rm);
 	} else if (((w >> 24) & 0x1f) == 0xA) {
 		// Logical (shifted register)
 		int shift = (w >> 22) & 0x3;
@@ -929,9 +929,9 @@ static void FPandASIMD2(uint32_t w, uint64_t addr, Instruction *instr) {
 			snprintf(instr->text, sizeof(instr->text), "(float cond compare %08x)", w);
 		} else if (((w >> 10) & 3) == 2) {
 			int opc = (w >> 12) & 0xf;
-			const char *opnames[9] = { "fmul", "fdiv", "fadd", "fsub", "fmax", "fmin", "fmaxnm", "fminnm", "fnmul" };
+			const char *opnames[16] = { "fmul", "fdiv", "fadd", "fsub", "fmax", "fmin", "fmaxnm", "fminnm", "fnmul" };
 			char r = ((w >> 22) & 1) ? 'd' : 's';
-			snprintf(instr->text, sizeof(instr->text), "%s %c%d, %c%d, %c%d", opnames[opc], r, Rd, r, Rn, r, Rm);
+			snprintf(instr->text, sizeof(instr->text), "%s %c%d, %c%d, %c%d", opnames[opc] ? opnames[opc] : "?", r, Rd, r, Rn, r, Rm);
 		} else if (((w >> 10) & 3) == 3) {
 			char fr = ((w >> 22) & 1) ? 'd' : 's';
 			int cond = (w >> 12) & 0xf;

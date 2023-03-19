@@ -6,13 +6,14 @@
 #include "Common/GPU/OpenGL/GLFeatures.h"
 #include "Common/GPU/OpenGL/DataFormatGL.h"
 #include "Common/Math/math_util.h"
+#include "Common/VR/PPSSPPVR.h"
 
 #include "Common/Log.h"
+#include "Common/LogReporting.h"
 #include "Common/MemoryUtil.h"
 #include "Common/StringUtils.h"
 #include "Common/Data/Convert/SmallDataConvert.h"
 
-#include "Core/Reporting.h"
 #include "GLQueueRunner.h"
 #include "GLRenderManager.h"
 #include "DataFormatGL.h"
@@ -22,6 +23,12 @@
 #define GL_CLIP_DISTANCE0 GL_CLIP_DISTANCE0_EXT
 #elif !defined(GL_CLIP_DISTANCE0)
 #define GL_CLIP_DISTANCE0 0x3000
+#endif
+#ifndef GL_DEPTH_STENCIL_TEXTURE_MODE
+#define GL_DEPTH_STENCIL_TEXTURE_MODE 0x90EA
+#endif
+#ifndef GL_STENCIL_INDEX
+#define GL_STENCIL_INDEX 0x1901
 #endif
 
 static constexpr int TEXCACHE_NAME_CACHE_SIZE = 16;
@@ -38,7 +45,7 @@ GLuint g_defaultFBO = 0;
 
 void GLQueueRunner::CreateDeviceObjects() {
 	CHECK_GL_ERROR_IF_DEBUG();
-	if (gl_extensions.EXT_texture_filter_anisotropic) {
+	if (caps_.anisoSupported) {
 		glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAnisotropyLevel_);
 	} else {
 		maxAnisotropyLevel_ = 0.0f;
@@ -81,9 +88,6 @@ void GLQueueRunner::DestroyDeviceObjects() {
 	delete[] readbackBuffer_;
 	readbackBuffer_ = nullptr;
 	readbackBufferSize_ = 0;
-	delete[] tempBuffer_;
-	tempBuffer_ = nullptr;
-	tempBufferSize_ = 0;
 	CHECK_GL_ERROR_IF_DEBUG();
 }
 
@@ -103,6 +107,19 @@ static std::string GetInfoLog(GLuint name, Getiv getiv, GetLog getLog) {
 
 	infoLog.resize(len);
 	return infoLog;
+}
+
+static int GetStereoBufferIndex(const char *uniformName) {
+	if (!uniformName) return -1;
+	else if (strcmp(uniformName, "u_view") == 0) return 0;
+	else if (strcmp(uniformName, "u_proj_lens") == 0) return 1;
+	else return -1;
+}
+
+static std::string GetStereoBufferLayout(const char *uniformName) {
+	if (strcmp(uniformName, "u_view") == 0) return "ViewMatrices";
+	else if (strcmp(uniformName, "u_proj_lens") == 0) return "ProjectionMatrix";
+	else return "undefined";
 }
 
 void GLQueueRunner::RunInitSteps(const std::vector<GLRInitStep> &steps, bool skipGLCalls) {
@@ -203,6 +220,7 @@ void GLQueueRunner::RunInitSteps(const std::vector<GLRInitStep> &steps, bool ski
 
 #if !defined(USING_GLES2)
 			if (step.create_program.support_dual_source) {
+				_dbg_assert_msg_(caps_.dualSourceBlend, "ARB/EXT_blend_func_extended required for dual src blend");
 				// Dual source alpha
 				glBindFragDataLocationIndexed(program->program, 0, 0, "fragColor0");
 				glBindFragDataLocationIndexed(program->program, 0, 1, "fragColor1");
@@ -211,6 +229,8 @@ void GLQueueRunner::RunInitSteps(const std::vector<GLRInitStep> &steps, bool ski
 			}
 #elif !PPSSPP_PLATFORM(IOS)
 			if (gl_extensions.GLES3 && step.create_program.support_dual_source) {
+				// For GLES2, we use gl_SecondaryFragColorEXT as fragColor1.
+				_dbg_assert_msg_(gl_extensions.EXT_blend_func_extended, "EXT_blend_func_extended required for dual src");
 				glBindFragDataLocationIndexedEXT(program->program, 0, 0, "fragColor0");
 				glBindFragDataLocationIndexedEXT(program->program, 0, 1, "fragColor1");
 			}
@@ -235,8 +255,8 @@ void GLQueueRunner::RunInitSteps(const std::vector<GLRInitStep> &steps, bool ski
 				ERROR_LOG(G3D, "Could not link program:\n %s", infoLog.c_str());
 				ERROR_LOG(G3D, "VS desc:\n%s", vsDesc.c_str());
 				ERROR_LOG(G3D, "FS desc:\n%s", fsDesc.c_str());
-				ERROR_LOG(G3D, "VS:\n%s\n", vsCode);
-				ERROR_LOG(G3D, "FS:\n%s\n", fsCode);
+				ERROR_LOG(G3D, "VS:\n%s\n", LineNumberString(vsCode).c_str());
+				ERROR_LOG(G3D, "FS:\n%s\n", LineNumberString(fsCode).c_str());
 
 #ifdef _WIN32
 				OutputDebugStringUTF8(infoLog.c_str());
@@ -253,9 +273,33 @@ void GLQueueRunner::RunInitSteps(const std::vector<GLRInitStep> &steps, bool ski
 
 			// Query all the uniforms.
 			for (size_t j = 0; j < program->queries_.size(); j++) {
-				auto &x = program->queries_[j];
-				_dbg_assert_(x.name);
-				*x.dest = glGetUniformLocation(program->program, x.name);
+				auto &query = program->queries_[j];
+				_dbg_assert_(query.name);
+
+				int location = -1;
+				if (IsVREnabled() && IsMultiviewSupported()) {
+					int index = GetStereoBufferIndex(query.name);
+					if (index >= 0) {
+						std::string layout = GetStereoBufferLayout(query.name);
+						glUniformBlockBinding(program->program, glGetUniformBlockIndex(program->program, layout.c_str()), index);
+
+						GLuint buffer = 0;
+						glGenBuffers(1, &buffer);
+						glBindBuffer(GL_UNIFORM_BUFFER, buffer);
+						glBufferData(GL_UNIFORM_BUFFER,2 * 16 * sizeof(float),NULL, GL_STATIC_DRAW);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						location = buffer;
+					} else {
+						location = glGetUniformLocation(program->program, query.name);
+					}
+				} else {
+					location = glGetUniformLocation(program->program, query.name);
+				}
+
+				if (location < 0 && query.required) {
+					WARN_LOG(G3D, "Required uniform query for '%s' failed", query.name);
+				}
+				*query.dest = location;
 			}
 
 			// Run initializers.
@@ -339,13 +383,33 @@ void GLQueueRunner::RunInitSteps(const std::vector<GLRInitStep> &steps, bool ski
 				boundTexture = tex->texture;
 			}
 			if (!step.texture_image.data && step.texture_image.allocType != GLRAllocType::NONE)
-				Crash();
+				_assert_msg_(false, "missing texture data");
+
 			// For things to show in RenderDoc, need to split into glTexImage2D(..., nullptr) and glTexSubImage.
+
+			int blockSize = 0;
+			bool bc = Draw::DataFormatIsBlockCompressed(step.texture_image.format, &blockSize);
 
 			GLenum internalFormat, format, type;
 			int alignment;
-			Thin3DFormatToFormatAndType(step.texture_image.format, internalFormat, format, type, alignment);
-			glTexImage2D(tex->target, step.texture_image.level, internalFormat, step.texture_image.width, step.texture_image.height, 0, format, type, step.texture_image.data);
+			Thin3DFormatToGLFormatAndType(step.texture_image.format, internalFormat, format, type, alignment);
+			if (step.texture_image.depth == 1) {
+				if (bc) {
+					int dataSize = ((step.texture_image.width + 3) & ~3) * ((step.texture_image.height + 3) & ~3) * blockSize / 16;
+					glCompressedTexImage2D(tex->target, step.texture_image.level, internalFormat,
+						step.texture_image.width, step.texture_image.height, 0, dataSize, step.texture_image.data);
+				} else {
+					glTexImage2D(tex->target,
+						step.texture_image.level, internalFormat,
+						step.texture_image.width, step.texture_image.height, 0,
+						format, type, step.texture_image.data);
+				}
+			} else {
+				glTexImage3D(tex->target,
+					step.texture_image.level, internalFormat,
+					step.texture_image.width, step.texture_image.height, step.texture_image.depth, 0,
+					format, type, step.texture_image.data);
+			}
 			allocatedTextures = true;
 			if (step.texture_image.allocType == GLRAllocType::ALIGNED) {
 				FreeAlignedMemory(step.texture_image.data);
@@ -361,6 +425,9 @@ void GLQueueRunner::RunInitSteps(const std::vector<GLRInitStep> &steps, bool ski
 			glTexParameteri(tex->target, GL_TEXTURE_WRAP_T, tex->wrapT);
 			glTexParameteri(tex->target, GL_TEXTURE_MAG_FILTER, tex->magFilter);
 			glTexParameteri(tex->target, GL_TEXTURE_MIN_FILTER, tex->minFilter);
+			if (step.texture_image.depth > 1) {
+				glTexParameteri(tex->target, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+			}
 			CHECK_GL_ERROR_IF_DEBUG();
 			break;
 		}
@@ -372,10 +439,10 @@ void GLQueueRunner::RunInitSteps(const std::vector<GLRInitStep> &steps, bool ski
 				glBindTexture(tex->target, tex->texture);
 				boundTexture = tex->texture;
 			}
-			if (!gl_extensions.IsGLES || gl_extensions.GLES3) {
-				glTexParameteri(tex->target, GL_TEXTURE_MAX_LEVEL, step.texture_finalize.maxLevel);
+			if ((!gl_extensions.IsGLES || gl_extensions.GLES3) && step.texture_finalize.loadedLevels > 1) {
+				glTexParameteri(tex->target, GL_TEXTURE_MAX_LEVEL, step.texture_finalize.loadedLevels - 1);
 			}
-			tex->maxLod = (float)step.texture_finalize.maxLevel;
+			tex->maxLod = (float)step.texture_finalize.loadedLevels - 1;
 			if (step.texture_finalize.genMips) {
 				glGenerateMipmap(tex->target);
 			}
@@ -384,7 +451,7 @@ void GLQueueRunner::RunInitSteps(const std::vector<GLRInitStep> &steps, bool ski
 		}
 		default:
 			CHECK_GL_ERROR_IF_DEBUG();
-			Crash();
+			_assert_msg_(false, "Bad GLRInitStepType: %d", (int)step.stepType);
 			break;
 		}
 	}
@@ -447,8 +514,8 @@ void GLQueueRunner::InitCreateFramebuffer(const GLRInitStep &step) {
 
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, tex.wrapS);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, tex.wrapT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, tex.magFilter);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, tex.minFilter);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, tex.magFilter);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, tex.minFilter);
 		if (!gl_extensions.IsGLES || gl_extensions.GLES3) {
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
 		}
@@ -588,8 +655,11 @@ retry_depth:
 	currentReadHandle_ = fbo->handle;
 }
 
-void GLQueueRunner::RunSteps(const std::vector<GLRStep *> &steps, bool skipGLCalls) {
+void GLQueueRunner::RunSteps(const std::vector<GLRStep *> &steps, bool skipGLCalls, bool keepSteps, bool useVR) {
 	if (skipGLCalls) {
+		if (keepSteps) {
+			return;
+		}
 		// Dry run
 		for (size_t i = 0; i < steps.size(); i++) {
 			const GLRStep &step = *steps[i];
@@ -631,45 +701,6 @@ void GLQueueRunner::RunSteps(const std::vector<GLRStep *> &steps, bool skipGLCal
 		}
 	}
 
-	auto ignoresContents = [](GLRRenderPassAction act) {
-		return act == GLRRenderPassAction::CLEAR || act == GLRRenderPassAction::DONT_CARE;
-	};
-	int invalidateAllMask = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
-
-	/*
-	for (int j = 0; j < (int)steps.size() - 1; ++j) {
-		GLRStep &primaryStep = *steps[j];
-		if (primaryStep.stepType == GLRStepType::RENDER) {
-			const GLRFramebuffer *fb = primaryStep.render.framebuffer;
-
-			// Let's see if we can invalidate it...
-			int invalidateMask = 0;
-			for (int i = j + 1; i < (int)steps.size(); ++i) {
-				const GLRStep &secondaryStep = *steps[i];
-				if (secondaryStep.stepType == GLRStepType::RENDER && secondaryStep.render.framebuffer == fb) {
-					if (ignoresContents(secondaryStep.render.color))
-						invalidateMask |= GL_COLOR_BUFFER_BIT;
-					if (ignoresContents(secondaryStep.render.depth))
-						invalidateMask |= GL_DEPTH_BUFFER_BIT;
-					if (ignoresContents(secondaryStep.render.stencil))
-						invalidateMask |= GL_STENCIL_BUFFER_BIT;
-
-					if (invalidateMask == invalidateAllMask)
-						break;
-				} else if (secondaryStep.dependencies.contains(fb)) {
-					// Can't do it, this step may depend on fb's data.
-					break;
-				}
-			}
-
-			if (invalidateMask) {
-				GLRRenderData data{ GLRRenderCommand::INVALIDATE };
-				data.clear.clearMask = invalidateMask;
-				primaryStep.commands.push_back(data);
-			}
-		}
-	}*/
-
 	CHECK_GL_ERROR_IF_DEBUG();
 	size_t renderCount = 0;
 	for (size_t i = 0; i < steps.size(); i++) {
@@ -683,7 +714,13 @@ void GLQueueRunner::RunSteps(const std::vector<GLRStep *> &steps, bool skipGLCal
 		switch (step.stepType) {
 		case GLRStepType::RENDER:
 			renderCount++;
-			PerformRenderPass(step, renderCount == 1, renderCount == totalRenderCount);
+			if (IsVREnabled()) {
+				GLRStep vrStep = step;
+				PreprocessStepVR(&vrStep);
+				PerformRenderPass(vrStep, renderCount == 1, renderCount == totalRenderCount);
+			} else {
+				PerformRenderPass(step, renderCount == 1, renderCount == totalRenderCount);
+			}
 			break;
 		case GLRStepType::COPY:
 			PerformCopy(step);
@@ -709,15 +746,12 @@ void GLQueueRunner::RunSteps(const std::vector<GLRStep *> &steps, bool skipGLCal
 			glPopDebugGroup();
 #endif
 
-		delete steps[i];
+		if (!keepSteps) {
+			delete steps[i];
+		}
 	}
 	CHECK_GL_ERROR_IF_DEBUG();
 }
-
-void GLQueueRunner::LogSteps(const std::vector<GLRStep *> &steps) {
-
-}
-
 
 void GLQueueRunner::PerformBlit(const GLRStep &step) {
 	CHECK_GL_ERROR_IF_DEBUG();
@@ -772,9 +806,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 	}
 
 	GLRProgram *curProgram = nullptr;
-	int activeSlot = 0;
-	if (first)
-		glActiveTexture(GL_TEXTURE0 + activeSlot);
+	int activeSlot = -1;
 
 	// State filtering tracking.
 	int attrMask = 0;
@@ -793,7 +825,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 	int logicOp = -1;
 	bool logicEnabled = false;
 #endif
-	bool clipDistance0Enabled = false;
+	bool clipDistanceEnabled[8]{};
 	GLuint blendEqColor = (GLuint)-1;
 	GLuint blendEqAlpha = (GLuint)-1;
 
@@ -817,7 +849,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 					glDepthFunc(c.depth.func);
 					depthFunc = c.depth.func;
 				}
-			} else if (!c.depth.enabled && depthEnabled) {
+			} else if (/* !c.depth.enabled && */ depthEnabled) {
 				glDisable(GL_DEPTH_TEST);
 				depthEnabled = false;
 			}
@@ -829,7 +861,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 					stencilEnabled = true;
 				}
 				glStencilFunc(c.stencilFunc.func, c.stencilFunc.ref, c.stencilFunc.compareMask);
-			} else if (stencilEnabled) {
+			} else if (/* !c.stencilFunc.enabled && */stencilEnabled) {
 				glDisable(GL_STENCIL_TEST);
 				stencilEnabled = false;
 			}
@@ -851,7 +883,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 					blendEqAlpha = c.blend.funcAlpha;
 				}
 				glBlendFuncSeparate(c.blend.srcColor, c.blend.dstColor, c.blend.srcAlpha, c.blend.dstAlpha);
-			} else if (!c.blend.enabled && blendEnabled) {
+			} else if (/* !c.blend.enabled && */ blendEnabled) {
 				glDisable(GL_BLEND);
 				blendEnabled = false;
 			}
@@ -871,7 +903,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 				if (logicOp != c.logic.logicOp) {
 					glLogicOp(c.logic.logicOp);
 				}
-			} else if (!c.logic.enabled && logicEnabled) {
+			} else if (/* !c.logic.enabled && */ logicEnabled) {
 				glDisable(GL_COLOR_LOGIC_OP);
 				logicEnabled = false;
 			}
@@ -918,23 +950,6 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
 			break;
-		case GLRRenderCommand::INVALIDATE:
-		{
-			GLenum attachments[3];
-			int count = 0;
-			bool isFBO = step.render.framebuffer != nullptr;
-			bool hasDepth = isFBO ? step.render.framebuffer->z_stencil_ : false;
-			if (c.clear.clearMask & GL_COLOR_BUFFER_BIT)
-				attachments[count++] = isFBO ? GL_COLOR_ATTACHMENT0 : GL_COLOR;
-			if (hasDepth && (c.clear.clearMask & GL_DEPTH_BUFFER_BIT))
-				attachments[count++] = isFBO ? GL_DEPTH_ATTACHMENT : GL_DEPTH;
-			if (hasDepth && (c.clear.clearMask & GL_STENCIL_BUFFER_BIT))
-				attachments[count++] = isFBO ? GL_STENCIL_ATTACHMENT : GL_STENCIL;
-			if (glInvalidateFramebuffer != nullptr && count != 0)
-				glInvalidateFramebuffer(GL_FRAMEBUFFER, count, attachments);
-			CHECK_GL_ERROR_IF_DEBUG();
-			break;
-		}
 		case GLRRenderCommand::BLENDCOLOR:
 			glBlendColor(c.blendColor.color[0], c.blendColor.color[1], c.blendColor.color[2], c.blendColor.color[3]);
 			break;
@@ -969,24 +984,18 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 		}
 		case GLRRenderCommand::UNIFORM4F:
 		{
+			_dbg_assert_(curProgram);
 			int loc = c.uniform4.loc ? *c.uniform4.loc : -1;
 			if (c.uniform4.name) {
 				loc = curProgram->GetUniformLoc(c.uniform4.name);
 			}
 			if (loc >= 0) {
+				_dbg_assert_(c.uniform4.count >=1 && c.uniform4.count <=4);
 				switch (c.uniform4.count) {
-				case 1:
-					glUniform1f(loc, c.uniform4.v[0]);
-					break;
-				case 2:
-					glUniform2fv(loc, 1, c.uniform4.v);
-					break;
-				case 3:
-					glUniform3fv(loc, 1, c.uniform4.v);
-					break;
-				case 4:
-					glUniform4fv(loc, 1, c.uniform4.v);
-					break;
+				case 1: glUniform1f(loc, c.uniform4.v[0]); break;
+				case 2: glUniform2fv(loc, 1, c.uniform4.v); break;
+				case 3: glUniform3fv(loc, 1, c.uniform4.v); break;
+				case 4: glUniform4fv(loc, 1, c.uniform4.v); break;
 				}
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
@@ -1000,19 +1009,12 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 				loc = curProgram->GetUniformLoc(c.uniform4.name);
 			}
 			if (loc >= 0) {
+				_dbg_assert_(c.uniform4.count >=1 && c.uniform4.count <=4);
 				switch (c.uniform4.count) {
-				case 1:
-					glUniform1uiv(loc, 1, (GLuint *)&c.uniform4.v[0]);
-					break;
-				case 2:
-					glUniform2uiv(loc, 1, (GLuint *)c.uniform4.v);
-					break;
-				case 3:
-					glUniform3uiv(loc, 1, (GLuint *)c.uniform4.v);
-					break;
-				case 4:
-					glUniform4uiv(loc, 1, (GLuint *)c.uniform4.v);
-					break;
+				case 1: glUniform1uiv(loc, 1, (GLuint *)c.uniform4.v); break;
+				case 2: glUniform2uiv(loc, 1, (GLuint *)c.uniform4.v); break;
+				case 3: glUniform3uiv(loc, 1, (GLuint *)c.uniform4.v); break;
+				case 4: glUniform4uiv(loc, 1, (GLuint *)c.uniform4.v); break;
 				}
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
@@ -1026,19 +1028,42 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 				loc = curProgram->GetUniformLoc(c.uniform4.name);
 			}
 			if (loc >= 0) {
+				_dbg_assert_(c.uniform4.count >=1 && c.uniform4.count <=4);
 				switch (c.uniform4.count) {
-				case 1:
-					glUniform1iv(loc, 1, (GLint *)&c.uniform4.v[0]);
-					break;
-				case 2:
-					glUniform2iv(loc, 1, (GLint *)c.uniform4.v);
-					break;
-				case 3:
-					glUniform3iv(loc, 1, (GLint *)c.uniform4.v);
-					break;
-				case 4:
-					glUniform4iv(loc, 1, (GLint *)c.uniform4.v);
-					break;
+				case 1: glUniform1iv(loc, 1, (GLint *)c.uniform4.v); break;
+				case 2: glUniform2iv(loc, 1, (GLint *)c.uniform4.v); break;
+				case 3: glUniform3iv(loc, 1, (GLint *)c.uniform4.v); break;
+				case 4: glUniform4iv(loc, 1, (GLint *)c.uniform4.v); break;
+				}
+			}
+			CHECK_GL_ERROR_IF_DEBUG();
+			break;
+		}
+		case GLRRenderCommand::UNIFORMSTEREOMATRIX:
+		{
+			_dbg_assert_(curProgram);
+			if (IsMultiviewSupported()) {
+				int layout = GetStereoBufferIndex(c.uniformMatrix4.name);
+				if (layout >= 0) {
+					int size = 2 * 16 * sizeof(float);
+					glBindBufferBase(GL_UNIFORM_BUFFER, layout, *c.uniformMatrix4.loc);
+					glBindBuffer(GL_UNIFORM_BUFFER, *c.uniformMatrix4.loc);
+					void *matrices = glMapBufferRange(GL_UNIFORM_BUFFER, 0, size, GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+					memcpy(matrices, c.uniformMatrix4.m, size);
+					glUnmapBuffer(GL_UNIFORM_BUFFER);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+				}
+			} else {
+				int loc = c.uniformMatrix4.loc ? *c.uniformMatrix4.loc : -1;
+				if (c.uniformMatrix4.name) {
+					loc = curProgram->GetUniformLoc(c.uniformMatrix4.name);
+				}
+				if (loc >= 0) {
+					if (GetVRFBOIndex() == 0) {
+						glUniformMatrix4fv(loc, 1, false, c.uniformMatrix4.m);
+					} else {
+						glUniformMatrix4fv(loc, 1, false, &c.uniformMatrix4.m[16]);
+					}
 				}
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
@@ -1084,15 +1109,25 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 				activeSlot = slot;
 			}
 			if (c.bind_fb_texture.aspect == GL_COLOR_BUFFER_BIT) {
-				if (curTex[slot] != &c.bind_fb_texture.framebuffer->color_texture)
+				if (curTex[slot] != &c.bind_fb_texture.framebuffer->color_texture) {
 					glBindTexture(GL_TEXTURE_2D, c.bind_fb_texture.framebuffer->color_texture.texture);
-				curTex[slot] = &c.bind_fb_texture.framebuffer->color_texture;
+					curTex[slot] = &c.bind_fb_texture.framebuffer->color_texture;
+				}
 			} else if (c.bind_fb_texture.aspect == GL_DEPTH_BUFFER_BIT) {
-				if (curTex[slot] != &c.bind_fb_texture.framebuffer->z_stencil_texture)
+				if (curTex[slot] != &c.bind_fb_texture.framebuffer->z_stencil_texture) {
 					glBindTexture(GL_TEXTURE_2D, c.bind_fb_texture.framebuffer->z_stencil_texture.texture);
-				curTex[slot] = &c.bind_fb_texture.framebuffer->z_stencil_texture;
+					curTex[slot] = &c.bind_fb_texture.framebuffer->z_stencil_texture;
+				}
+				// This should be uncommon, so always set the mode.
+				glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_STENCIL_TEXTURE_MODE, GL_DEPTH_COMPONENT);
+			} else if (c.bind_fb_texture.aspect == GL_STENCIL_BUFFER_BIT) {
+				if (curTex[slot] != &c.bind_fb_texture.framebuffer->z_stencil_texture) {
+					glBindTexture(GL_TEXTURE_2D, c.bind_fb_texture.framebuffer->z_stencil_texture.texture);
+					curTex[slot] = &c.bind_fb_texture.framebuffer->z_stencil_texture;
+				}
+				// This should be uncommon, so always set the mode.
+				glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_STENCIL_TEXTURE_MODE, GL_STENCIL_INDEX);
 			} else {
-				// TODO: Stencil texturing?
 				curTex[slot] = nullptr;
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
@@ -1102,14 +1137,18 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 		{
 			if (curProgram != c.program.program) {
 				glUseProgram(c.program.program->program);
-				if (c.program.program->use_clip_distance0 != clipDistance0Enabled) {
-					if (c.program.program->use_clip_distance0)
-						glEnable(GL_CLIP_DISTANCE0);
-					else
-						glDisable(GL_CLIP_DISTANCE0);
-					clipDistance0Enabled = c.program.program->use_clip_distance0;
-				}
 				curProgram = c.program.program;
+
+				for (size_t i = 0; i < ARRAY_SIZE(clipDistanceEnabled); ++i) {
+					if (c.program.program->use_clip_distance[i] == clipDistanceEnabled[i])
+						continue;
+
+					if (c.program.program->use_clip_distance[i])
+						glEnable(GL_CLIP_DISTANCE0 + (GLenum)i);
+					else
+						glDisable(GL_CLIP_DISTANCE0 + (GLenum)i);
+					clipDistanceEnabled[i] = c.program.program->use_clip_distance[i];
+				}
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
 			break;
@@ -1124,17 +1163,20 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 				glBindBuffer(GL_ARRAY_BUFFER, buf);
 				curArrayBuffer = buf;
 			}
-			int enable = layout->semanticsMask_ & ~attrMask;
-			int disable = (~layout->semanticsMask_) & attrMask;
-			for (int i = 0; i < 7; i++) {  // SEM_MAX
-				if (enable & (1 << i)) {
-					glEnableVertexAttribArray(i);
+			if (attrMask != layout->semanticsMask_) {
+				int enable = layout->semanticsMask_ & ~attrMask;
+				int disable = (~layout->semanticsMask_) & attrMask;
+
+				for (int i = 0; i < 7; i++) {  // SEM_MAX
+					if (enable & (1 << i)) {
+						glEnableVertexAttribArray(i);
+					}
+					if (disable & (1 << i)) {
+						glDisableVertexAttribArray(i);
+					}
 				}
-				if (disable & (1 << i)) {
-					glDisableVertexAttribArray(i);
-				}
+				attrMask = layout->semanticsMask_;
 			}
-			attrMask = layout->semanticsMask_;
 			for (size_t i = 0; i < layout->entries.size(); i++) {
 				auto &entry = layout->entries[i];
 				glVertexAttribPointer(entry.location, entry.count, entry.type, entry.normalized, entry.stride, (const void *)(c.bindVertexBuffer.offset + entry.offset));
@@ -1148,14 +1190,14 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 				Crash();
 			} else if (c.bind_buffer.target == GL_ELEMENT_ARRAY_BUFFER) {
 				GLuint buf = c.bind_buffer.buffer ? c.bind_buffer.buffer->buffer_ : 0;
-				_dbg_assert_(!c.bind_buffer.buffer->Mapped());
+				_dbg_assert_(!(c.bind_buffer.buffer && c.bind_buffer.buffer->Mapped()));
 				if (buf != curElemArrayBuffer) {
 					glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf);
 					curElemArrayBuffer = buf;
 				}
 			} else {
 				GLuint buf = c.bind_buffer.buffer ? c.bind_buffer.buffer->buffer_ : 0;
-				_dbg_assert_(!c.bind_buffer.buffer->Mapped());
+				_dbg_assert_(!(c.bind_buffer.buffer && c.bind_buffer.buffer->Mapped()));
 				glBindBuffer(c.bind_buffer.target, buf);
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
@@ -1192,28 +1234,28 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 			CHECK_GL_ERROR_IF_DEBUG();
 			if (tex->canWrap) {
 				if (tex->wrapS != c.textureSampler.wrapS) {
-					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, c.textureSampler.wrapS);
+					glTexParameteri(tex->target, GL_TEXTURE_WRAP_S, c.textureSampler.wrapS);
 					tex->wrapS = c.textureSampler.wrapS;
 				}
 				if (tex->wrapT != c.textureSampler.wrapT) {
-					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, c.textureSampler.wrapT);
+					glTexParameteri(tex->target, GL_TEXTURE_WRAP_T, c.textureSampler.wrapT);
 					tex->wrapT = c.textureSampler.wrapT;
 				}
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
 			if (tex->magFilter != c.textureSampler.magFilter) {
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, c.textureSampler.magFilter);
+				glTexParameteri(tex->target, GL_TEXTURE_MAG_FILTER, c.textureSampler.magFilter);
 				tex->magFilter = c.textureSampler.magFilter;
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
 			if (tex->minFilter != c.textureSampler.minFilter) {
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, c.textureSampler.minFilter);
+				glTexParameteri(tex->target, GL_TEXTURE_MIN_FILTER, c.textureSampler.minFilter);
 				tex->minFilter = c.textureSampler.minFilter;
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
 			if (tex->anisotropy != c.textureSampler.anisotropy) {
 				if (c.textureSampler.anisotropy != 0.0f) {
-					glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, c.textureSampler.anisotropy);
+					glTexParameterf(tex->target, GL_TEXTURE_MAX_ANISOTROPY_EXT, c.textureSampler.anisotropy);
 				}
 				tex->anisotropy = c.textureSampler.anisotropy;
 			}
@@ -1222,7 +1264,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 		}
 		case GLRRenderCommand::TEXTURELOD:
 		{
-			GLint slot = c.textureSampler.slot;
+			GLint slot = c.textureLod.slot;
 			if (slot != activeSlot) {
 				glActiveTexture(GL_TEXTURE0 + slot);
 				activeSlot = slot;
@@ -1233,30 +1275,36 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 			}
 #ifndef USING_GLES2
 			if (tex->lodBias != c.textureLod.lodBias && !gl_extensions.IsGLES) {
-				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, c.textureLod.lodBias);
+				glTexParameterf(tex->target, GL_TEXTURE_LOD_BIAS, c.textureLod.lodBias);
 				tex->lodBias = c.textureLod.lodBias;
 			}
 #endif
 			if (tex->minLod != c.textureLod.minLod) {
-				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, c.textureLod.minLod);
+				glTexParameterf(tex->target, GL_TEXTURE_MIN_LOD, c.textureLod.minLod);
 				tex->minLod = c.textureLod.minLod;
 			}
 			if (tex->maxLod != c.textureLod.maxLod) {
-				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, c.textureLod.maxLod);
+				glTexParameterf(tex->target, GL_TEXTURE_MAX_LOD, c.textureLod.maxLod);
 				tex->maxLod = c.textureLod.maxLod;
 			}
 			break;
 		}
 		case GLRRenderCommand::TEXTURE_SUBIMAGE:
 		{
-			GLRTexture *tex = c.texture_subimage.texture;
+			GLint slot = c.texture_subimage.slot;
+			if (slot != activeSlot) {
+				glActiveTexture(GL_TEXTURE0 + slot);
+				activeSlot = slot;
+			}
 			// TODO: Need bind?
+			GLRTexture *tex = c.texture_subimage.texture;
 			if (!c.texture_subimage.data)
 				Crash();
+			_assert_(tex->target == GL_TEXTURE_2D);
 			// For things to show in RenderDoc, need to split into glTexImage2D(..., nullptr) and glTexSubImage.
 			GLuint internalFormat, format, type;
 			int alignment;
-			Thin3DFormatToFormatAndType(c.texture_subimage.format, internalFormat, format, type, alignment);
+			Thin3DFormatToGLFormatAndType(c.texture_subimage.format, internalFormat, format, type, alignment);
 			glTexSubImage2D(tex->target, c.texture_subimage.level, c.texture_subimage.x, c.texture_subimage.y, c.texture_subimage.width, c.texture_subimage.height, format, type, c.texture_subimage.data);
 			if (c.texture_subimage.allocType == GLRAllocType::ALIGNED) {
 				FreeAlignedMemory(c.texture_subimage.data);
@@ -1274,7 +1322,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 				}
 				glFrontFace(c.raster.frontFace);
 				glCullFace(c.raster.cullFace);
-			} else if (!c.raster.cullEnable && cullEnabled) {
+			} else if (/* !c.raster.cullEnable && */ cullEnabled) {
 				glDisable(GL_CULL_FACE);
 				cullEnabled = false;
 			}
@@ -1283,7 +1331,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 					glEnable(GL_DITHER);
 					ditherEnabled = true;
 				}
-			} else if (!c.raster.ditherEnable && ditherEnabled) {
+			} else if (/* !c.raster.ditherEnable && */ ditherEnabled) {
 				glDisable(GL_DITHER);
 				ditherEnabled = false;
 			}
@@ -1293,7 +1341,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 					glEnable(GL_DEPTH_CLAMP);
 					depthClampEnabled = true;
 				}
-			} else if (!c.raster.depthClampEnable && depthClampEnabled) {
+			} else if (/* !c.raster.depthClampEnable && */ depthClampEnabled) {
 				glDisable(GL_DEPTH_CLAMP);
 				depthClampEnabled = false;
 			}
@@ -1301,7 +1349,7 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 			CHECK_GL_ERROR_IF_DEBUG();
 			break;
 		default:
-			Crash();
+			_assert_msg_(false, "Bad GLRRenderCommand: %d", (int)c.cmd);
 			break;
 		}
 	}
@@ -1343,8 +1391,10 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 		glDisable(GL_COLOR_LOGIC_OP);
 	}
 #endif
-	if (clipDistance0Enabled)
-		glDisable(GL_CLIP_DISTANCE0);
+	for (size_t i = 0; i < ARRAY_SIZE(clipDistanceEnabled); ++i) {
+		if (clipDistanceEnabled[i])
+			glDisable(GL_CLIP_DISTANCE0 + (GLenum)i);
+	}
 	if ((colorMask & 15) != 15)
 		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 	CHECK_GL_ERROR_IF_DEBUG();
@@ -1387,16 +1437,16 @@ void GLQueueRunner::PerformCopy(const GLRStep &step) {
 	_dbg_assert_(srcTex);
 	_dbg_assert_(dstTex);
 
+	_assert_msg_(caps_.framebufferCopySupported, "Image copy extension expected");
+
 #if defined(USING_GLES2)
 #if !PPSSPP_PLATFORM(IOS)
-	_assert_msg_(gl_extensions.OES_copy_image || gl_extensions.NV_copy_image || gl_extensions.EXT_copy_image, "Image copy extension expected");
 	glCopyImageSubDataOES(
 		srcTex, target, srcLevel, srcRect.x, srcRect.y, srcZ,
 		dstTex, target, dstLevel, dstPos.x, dstPos.y, dstZ,
 		srcRect.w, srcRect.h, depth);
 #endif
 #else
-	_assert_msg_(gl_extensions.ARB_copy_image || gl_extensions.NV_copy_image, "Image copy extension expected");
 	if (gl_extensions.ARB_copy_image) {
 		glCopyImageSubData(
 			srcTex, target, srcLevel, srcRect.x, srcRect.y, srcZ,
@@ -1428,25 +1478,23 @@ void GLQueueRunner::PerformReadback(const GLRStep &pass) {
 	CHECK_GL_ERROR_IF_DEBUG();
 
 	// Always read back in 8888 format for the color aspect.
-	GLuint internalFormat = GL_RGBA;
 	GLuint format = GL_RGBA;
 	GLuint type = GL_UNSIGNED_BYTE;
 	int srcAlignment = 4;
-	int dstAlignment = (int)DataFormatSizeInBytes(pass.readback.dstFormat);
 
 #ifndef USING_GLES2
 	if (pass.readback.aspectMask & GL_DEPTH_BUFFER_BIT) {
-		internalFormat = GL_DEPTH_COMPONENT;
 		format = GL_DEPTH_COMPONENT;
 		type = GL_FLOAT;
 		srcAlignment = 4;
 	} else if (pass.readback.aspectMask & GL_STENCIL_BUFFER_BIT) {
-		internalFormat = GL_STENCIL_INDEX;
 		format = GL_STENCIL_INDEX;
 		type = GL_UNSIGNED_BYTE;
 		srcAlignment = 1;
 	}
 #endif
+
+	readbackAspectMask_ = pass.readback.aspectMask;
 
 	int pixelStride = pass.readback.srcRect.w;
 	// Apply the correct alignment.
@@ -1458,30 +1506,19 @@ void GLQueueRunner::PerformReadback(const GLRStep &pass) {
 
 	GLRect2D rect = pass.readback.srcRect;
 
-	bool convert = internalFormat == GL_RGBA && pass.readback.dstFormat != DataFormat::R8G8B8A8_UNORM;
-
-	int tempSize = srcAlignment * rect.w * rect.h;
-	int readbackSize = dstAlignment * rect.w * rect.h;
-	if (convert && tempSize > tempBufferSize_) {
-		delete[] tempBuffer_;
-		tempBuffer_ = new uint8_t[tempSize];
-		tempBufferSize_ = tempSize;
-	}
+	int readbackSize = srcAlignment * rect.w * rect.h;
 	if (readbackSize > readbackBufferSize_) {
 		delete[] readbackBuffer_;
 		readbackBuffer_ = new uint8_t[readbackSize];
 		readbackBufferSize_ = readbackSize;
 	}
 
-	glReadPixels(rect.x, rect.y, rect.w, rect.h, format, type, convert ? tempBuffer_ : readbackBuffer_);
+	glReadPixels(rect.x, rect.y, rect.w, rect.h, format, type, readbackBuffer_);
 	#ifdef DEBUG_READ_PIXELS
 	LogReadPixelsError(glGetError());
 	#endif
 	if (!gl_extensions.IsGLES || gl_extensions.GLES3) {
 		glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-	}
-	if (convert && tempBuffer_ && readbackBuffer_) {
-		ConvertFromRGBA8888(readbackBuffer_, tempBuffer_, pixelStride, pixelStride, rect.w, rect.h, pass.readback.dstFormat);
 	}
 	CHECK_GL_ERROR_IF_DEBUG();
 }
@@ -1511,7 +1548,7 @@ void GLQueueRunner::PerformReadbackImage(const GLRStep &pass) {
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, pass.readback_image.mipLevel, GL_TEXTURE_WIDTH, &w);
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, pass.readback_image.mipLevel, GL_TEXTURE_HEIGHT, &h);
 
-		int size = 4 * std::max((int)w, rect.x + rect.w) * std::max((int)h, rect.h);
+		int size = 4 * std::max((int)w, rect.x + rect.w) * std::max((int)h, rect.y + rect.h);
 		if (size > readbackBufferSize_) {
 			delete[] readbackBuffer_;
 			readbackBuffer_ = new uint8_t[size];
@@ -1554,12 +1591,15 @@ void GLQueueRunner::PerformBindFramebufferAsRenderTarget(const GLRStep &pass) {
 		fbo_bind_fb_target(false, curFB_->handle);
 	} else {
 		fbo_unbind();
+		if (IsVREnabled()) {
+			BindVRFramebuffer();
+		}
 		// Backbuffer is now bound.
 	}
 	CHECK_GL_ERROR_IF_DEBUG();
 }
 
-void GLQueueRunner::CopyReadbackBuffer(int width, int height, Draw::DataFormat srcFormat, Draw::DataFormat destFormat, int pixelStride, uint8_t *pixels) {
+void GLQueueRunner::CopyFromReadbackBuffer(GLRFramebuffer *framebuffer, int width, int height, Draw::DataFormat srcFormat, Draw::DataFormat destFormat, int pixelStride, uint8_t *pixels) {
 	// TODO: Maybe move data format conversion here, and always read back 8888. Drivers
 	// don't usually provide very optimized conversion implementations, though some do.
 	// Just need to be careful about dithering, which may break Danganronpa.
@@ -1568,8 +1608,25 @@ void GLQueueRunner::CopyReadbackBuffer(int width, int height, Draw::DataFormat s
 		// Something went wrong during the read and no readback buffer was allocated, probably.
 		return;
 	}
-	for (int y = 0; y < height; y++) {
-		memcpy(pixels + y * pixelStride * bpp, readbackBuffer_ + y * width * bpp, width * bpp);
+
+	// Always read back in 8888 format for the color aspect.
+	GLuint internalFormat = GL_RGBA;
+#ifndef USING_GLES2
+	if (readbackAspectMask_ & GL_DEPTH_BUFFER_BIT) {
+		internalFormat = GL_DEPTH_COMPONENT;
+	} else if (readbackAspectMask_ & GL_STENCIL_BUFFER_BIT) {
+		internalFormat = GL_STENCIL_INDEX;
+	}
+#endif
+
+	bool convert = internalFormat == GL_RGBA && destFormat != Draw::DataFormat::R8G8B8A8_UNORM;
+	if (convert) {
+		// srcStride is width because we read back "packed" (with no gaps) from GL.
+		ConvertFromRGBA8888(pixels, readbackBuffer_, pixelStride, width, width, height, destFormat);
+	} else {
+		for (int y = 0; y < height; y++) {
+			memcpy(pixels + y * pixelStride * bpp, readbackBuffer_ + y * width * bpp, width * bpp);
+		}
 	}
 }
 
@@ -1702,7 +1759,7 @@ void GLQueueRunner::fbo_unbind() {
 	glBindFramebuffer(GL_FRAMEBUFFER, g_defaultFBO);
 #endif
 
-#if PPSSPP_PLATFORM(IOS)
+#if PPSSPP_PLATFORM(IOS) && !defined(__LIBRETRO__)
 	bindDefaultFBO();
 #endif
 

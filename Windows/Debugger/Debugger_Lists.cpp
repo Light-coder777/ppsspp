@@ -307,7 +307,6 @@ void CtrlBreakpointList::reloadBreakpoints()
 	// Update the items we're displaying from the debugger.
 	displayedBreakPoints_ = CBreakPoints::GetBreakpoints();
 	displayedMemChecks_= CBreakPoints::GetMemChecks();
-	Update();
 
 	for (int i = 0; i < GetRowCount(); i++)
 	{
@@ -321,6 +320,8 @@ void CtrlBreakpointList::reloadBreakpoints()
 		else
 			SetCheckState(i, displayedBreakPoints_[index].IsEnabled());
 	}
+
+	Update();
 }
 
 void CtrlBreakpointList::editBreakpoint(int itemIndex)
@@ -401,11 +402,11 @@ void CtrlBreakpointList::removeBreakpoint(int itemIndex)
 	}
 }
 
-int CtrlBreakpointList::getTotalBreakpointCount()
-{
-	int count = (int)CBreakPoints::GetMemChecks().size();
-	for (size_t i = 0; i < CBreakPoints::GetBreakpoints().size(); i++) {
-		if (!displayedBreakPoints_[i].temporary) count++;
+int CtrlBreakpointList::getTotalBreakpointCount() {
+	int count = (int)displayedMemChecks_.size();
+	for (auto bp : displayedBreakPoints_) {
+		if (!bp.temporary)
+			++count;
 	}
 
 	return count;
@@ -699,8 +700,11 @@ void CtrlStackTraceView::OnDoubleClick(int itemIndex, int column)
 	SendMessage(GetParent(GetHandle()),WM_DEB_GOTOWPARAM,frames[itemIndex].pc,0);
 }
 
-void CtrlStackTraceView::loadStackTrace()
-{
+void CtrlStackTraceView::loadStackTrace() {
+	auto memLock = Memory::Lock();
+	if (!PSP_IsInited())
+		return;
+
 	auto threads = GetThreadsInfo();
 
 	u32 entry = 0, stackTop = 0;

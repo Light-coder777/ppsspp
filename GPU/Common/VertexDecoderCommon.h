@@ -21,13 +21,15 @@
 
 #include "ppsspp_config.h"
 
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 #include "Common/Data/Collections/Hashmaps.h"
+#include "Common/Data/Convert/SmallDataConvert.h"
 #include "Common/Log.h"
-#include "Core/Reporting.h"
+#include "Common/LogReporting.h"
 #include "GPU/ge_constants.h"
 #include "GPU/Common/ShaderCommon.h"
 #include "GPU/GPUCommon.h"
+#include "GPU/GPUState.h"
 
 #if PPSSPP_ARCH(ARM)
 #include "Common/ArmEmitter.h"
@@ -35,6 +37,8 @@
 #include "Common/Arm64Emitter.h"
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
 #include "Common/x64Emitter.h"
+#elif PPSSPP_ARCH(RISCV64)
+#include "Common/RiscVEmitter.h"
 #else
 #include "Common/FakeEmitter.h"
 #endif
@@ -121,103 +125,22 @@ public:
 	VertexReader(u8 *base, const DecVtxFormat &decFmt, int vtype) : base_(base), data_(base), decFmt_(decFmt), vtype_(vtype) {}
 
 	void ReadPos(float pos[3]) const {
-		switch (decFmt_.posfmt) {
-		case DEC_FLOAT_3:
-			{
-				const float *f = (const float *)(data_ + decFmt_.posoff);
-				memcpy(pos, f, 12);
-				if (isThrough()) {
-					// Integer value passed in a float. Clamped to 0, 65535.
-					const float z = (int)pos[2] * (1.0f / 65535.0f);
-					pos[2] = z > 1.0f ? 1.0f : (z < 0.0f ? 0.0f : z);
-				}
-			}
-			break;
-		case DEC_S16_3:
-			{
-				// X and Y are signed 16 bit, Z is unsigned 16 bit
-				const s16 *s = (const s16 *)(data_ + decFmt_.posoff);
-				const u16 *u = (const u16 *)(data_ + decFmt_.posoff);
-				if (isThrough()) {
-					for (int i = 0; i < 2; i++)
-						pos[i] = s[i];
-					pos[2] = u[2] * (1.0f / 65535.0f);
-				} else {
-					for (int i = 0; i < 3; i++)
-						pos[i] = s[i] * (1.0f / 32768.0f);
-				}
-			}
-			break;
-		case DEC_S8_3:
-			{
-				// X and Y are signed 8 bit, Z is unsigned 8 bit
-				const s8 *b = (const s8 *)(data_ + decFmt_.posoff);
-				const u8 *u = (const u8 *)(data_ + decFmt_.posoff);
-				if (isThrough()) {
-					for (int i = 0; i < 2; i++)
-						pos[i] = b[i];
-					pos[2] = u[2] * (1.0f / 255.0f);
-				} else {
-					for (int i = 0; i < 3; i++)
-						pos[i] = b[i] * (1.0f / 128.0f);
-				}
-			}
-			break;
-		default:
-			ERROR_LOG_REPORT_ONCE(fmtpos, G3D, "Reader: Unsupported Pos Format %d", decFmt_.posfmt);
-			memset(pos, 0, sizeof(float) * 3);
-			break;
+		// Only DEC_FLOAT_3 is supported.
+		const float *f = (const float *)(data_ + decFmt_.posoff);
+		pos[0] = f[0];
+		pos[1] = f[1];
+		if (!isThrough()) {
+			pos[2] = f[2];
+		} else {
+			// Integer value passed in a float. Clamped to 0, 65535.
+			pos[2] = (int)f[2] * (1.0f / 65535.0f);
 		}
 	}
 
 	void ReadPosThroughZ16(float pos[3]) const {
-		switch (decFmt_.posfmt) {
-		case DEC_FLOAT_3:
-			{
-				const float *f = (const float *)(data_ + decFmt_.posoff);
-				memcpy(pos, f, 12);
-				if (isThrough()) {
-					// Integer value passed in a float. Clamped to 0, 65535.
-					const float z = (int)pos[2];
-					pos[2] = z > 65535.0f ? 65535.0f : (z < 0.0f ? 0.0f : z);
-				}
-			}
-			break;
-		case DEC_S16_3:
-			{
-				// X and Y are signed 16 bit, Z is unsigned 16 bit
-				const s16 *s = (const s16 *)(data_ + decFmt_.posoff);
-				const u16 *u = (const u16 *)(data_ + decFmt_.posoff);
-				if (isThrough()) {
-					for (int i = 0; i < 2; i++)
-						pos[i] = s[i];
-					pos[2] = u[2];
-				} else {
-					for (int i = 0; i < 3; i++)
-						pos[i] = s[i] * (1.0f / 32768.0f);
-				}
-			}
-			break;
-		case DEC_S8_3:
-			{
-				// X and Y are signed 8 bit, Z is unsigned 8 bit
-				const s8 *b = (const s8 *)(data_ + decFmt_.posoff);
-				const u8 *u = (const u8 *)(data_ + decFmt_.posoff);
-				if (isThrough()) {
-					for (int i = 0; i < 2; i++)
-						pos[i] = b[i];
-					pos[2] = u[2];
-				} else {
-					for (int i = 0; i < 3; i++)
-						pos[i] = b[i] * (1.0f / 128.0f);
-				}
-			}
-			break;
-		default:
-			ERROR_LOG_REPORT_ONCE(fmtz16, G3D, "Reader: Unsupported Pos Format %d", decFmt_.posfmt);
-			memset(pos, 0, sizeof(float) * 3);
-			break;
-		}
+		// Only DEC_FLOAT_3 is supported.
+		const float *f = (const float *)(data_ + decFmt_.posoff);
+		memcpy(pos, f, 12);
 	}
 
 	void ReadNrm(float nrm[3]) const {
@@ -245,87 +168,52 @@ public:
 			}
 			break;
 		default:
-			ERROR_LOG_REPORT_ONCE(fmtnrm, G3D, "Reader: Unsupported Nrm Format %d", decFmt_.nrmfmt);
 			memset(nrm, 0, sizeof(float) * 3);
 			break;
 		}
 	}
 
 	void ReadUV(float uv[2]) const {
-		switch (decFmt_.uvfmt) {
-		case DEC_U8_2:
-			{
-				const u8 *b = (const u8 *)(data_ + decFmt_.uvoff);
-				uv[0] = b[0] * (1.f / 128.f);
-				uv[1] = b[1] * (1.f / 128.f);
-			}
-			break;
-
-		case DEC_U16_2:
-			{
-				const u16 *s = (const u16 *)(data_ + decFmt_.uvoff);
-				uv[0] = s[0] * (1.f / 32768.f);
-				uv[1] = s[1] * (1.f / 32768.f);
-			}
-			break;
-
-		case DEC_FLOAT_2:
-			{
-				const float *f = (const float *)(data_ + decFmt_.uvoff);
-				uv[0] = f[0];
-				uv[1] = f[1];
-			}
-			break;
-
-		default:
-			ERROR_LOG_REPORT_ONCE(fmtuv, G3D, "Reader: Unsupported UV Format %d", decFmt_.uvfmt);
-			memset(uv, 0, sizeof(float) * 2);
-			break;
-		}
+		// Only DEC_FLOAT_2 is supported.
+		const float *f = (const float *)(data_ + decFmt_.uvoff);
+		uv[0] = f[0];
+		uv[1] = f[1];
 	}
 
 	void ReadColor0(float color[4]) const {
 		switch (decFmt_.c0fmt) {
 		case DEC_U8_4:
-			{
-				const u8 *b = (const u8 *)(data_ + decFmt_.c0off);
-				for (int i = 0; i < 4; i++)
-					color[i] = b[i] * (1.f / 255.f);
-			}
+			Uint8x4ToFloat4(color, *(const u32 *)(data_ + decFmt_.c0off));
 			break;
 		case DEC_FLOAT_4:
 			memcpy(color, data_ + decFmt_.c0off, 16); 
 			break;
 		default:
-			ERROR_LOG_REPORT_ONCE(fmtc0, G3D, "Reader: Unsupported C0 Format %d", decFmt_.c0fmt);
 			memset(color, 0, sizeof(float) * 4);
 			break;
 		}
 	}
 
-	void ReadColor0_8888(u8 color[4]) const {
+	u32 ReadColor0_8888() const {
 		switch (decFmt_.c0fmt) {
 		case DEC_U8_4:
 			{
 				const u8 *b = (const u8 *)(data_ + decFmt_.c0off);
-				for (int i = 0; i < 4; i++)
-					color[i] = b[i];
+				u32 value;
+				memcpy(&value, b, 4);
+				return value;
 			}
 			break;
 		case DEC_FLOAT_4:
 			{
 				const float *f = (const float *)(data_ + decFmt_.c0off);
-				for (int i = 0; i < 4; i++)
-					color[i] = f[i] * 255.0f;
+				return Float4ToUint8x4_NoClamp(f);
 			}
 			break;
 		default:
-			ERROR_LOG_REPORT_ONCE(fmtc0_8888, G3D, "Reader: Unsupported C0 Format %d", decFmt_.c0fmt);
-			memset(color, 0, sizeof(u8) * 4);
-			break;
+			return 0;
 		}
 	}
-
 
 	void ReadColor1(float color[3]) const {
 		switch (decFmt_.c1fmt) {
@@ -340,7 +228,6 @@ public:
 			memcpy(color, data_ + decFmt_.c1off, 12); 
 			break;
 		default:
-			ERROR_LOG_REPORT_ONCE(fmtc1, G3D, "Reader: Unsupported C1 Format %d", decFmt_.c1fmt);
 			memset(color, 0, sizeof(float) * 3);
 			break;
 		}
@@ -395,7 +282,6 @@ public:
 		case DEC_U16_3: for (int i = 0; i < 3; i++) weights[i+4] = s[i] * (1.f / 32768.f); break;
 		case DEC_U16_4: for (int i = 0; i < 4; i++) weights[i+4] = s[i]  * (1.f / 32768.f); break;
 		default:
-			ERROR_LOG_REPORT_ONCE(fmtw1, G3D, "Reader: Unsupported W1 Format %d", decFmt_.w1fmt);
 			memset(weights + 4, 0, sizeof(float) * 4);
 			break;
 		}
@@ -417,7 +303,7 @@ private:
 	int vtype_;
 };
 // Debugging utilities
-void PrintDecodedVertex(VertexReader &vtx);
+void PrintDecodedVertex(const VertexReader &vtx);
 
 
 class VertexDecoder;
@@ -439,12 +325,12 @@ typedef void(*JittedVertexDecoder)(const u8 *src, u8 *dst, int count);
 struct VertexDecoderOptions {
 	bool expandAllWeightsToFloat;
 	bool expand8BitNormalsToFloat;
+	bool applySkinInDecode;
+	bool alignOutputToWord;
 };
 
 class VertexDecoder {
 public:
-	VertexDecoder();
-
 	// A jit cache is not mandatory.
 	void SetVertexType(u32 vtype, const VertexDecoderOptions &options, VertexDecoderJitCache *jitCache = nullptr);
 
@@ -454,8 +340,6 @@ public:
 
 	void DecodeVerts(u8 *decoded, const void *verts, int indexLowerBound, int indexUpperBound) const;
 
-	bool hasColor() const { return col != 0; }
-	bool hasTexcoord() const { return tc != 0; }
 	int VertexSize() const { return size; }  // PSP format size
 
 	std::string GetString(DebugShaderStringType stringType);
@@ -539,6 +423,7 @@ public:
 	void Step_PosS16MorphSkin() const;
 	void Step_PosFloatMorphSkin() const;
 
+	void Step_PosInvalid() const;
 	void Step_PosS8Through() const;
 	void Step_PosS16Through() const;
 	void Step_PosFloatThrough() const;
@@ -549,11 +434,10 @@ public:
 	int ToString(char *output) const;
 
 	// Mutable decoder state
-	mutable u8 *decoded_;
-	mutable const u8 *ptr_;
-
-	JittedVertexDecoder jitted_;
-	int32_t jittedSize_;
+	mutable u8 *decoded_ = nullptr;
+	mutable const u8 *ptr_ = nullptr;
+	JittedVertexDecoder jitted_ = 0;
+	int32_t jittedSize_ = 0;
 
 	// "Immutable" state, set at startup
 
@@ -565,7 +449,9 @@ public:
 	DecVtxFormat decFmt;
 
 	bool throughmode;
-	u8 size;
+	bool skinInDecode;
+	// With morph and weights, this can be more than 256 bytes.
+	u16 size;
 	u8 onesize_;
 
 	u8 weightoff;
@@ -605,6 +491,8 @@ public:
 #define VERTEXDECODER_JIT_BACKEND Arm64Gen::ARM64CodeBlock
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
 #define VERTEXDECODER_JIT_BACKEND Gen::XCodeBlock
+#elif PPSSPP_ARCH(RISCV64)
+#define VERTEXDECODER_JIT_BACKEND RiscVGen::RiscVCodeBlock
 #endif
 
 
@@ -661,11 +549,11 @@ public:
 	void Jit_NormalFloatSkin();
 
 	void Jit_PosS8();
-	void Jit_PosS8ToFloat();
 	void Jit_PosS16();
 	void Jit_PosFloat();
 	void Jit_PosS8Through();
 	void Jit_PosS16Through();
+	void Jit_PosFloatThrough();
 
 	void Jit_PosS8Skin();
 	void Jit_PosS16Skin();
@@ -675,9 +563,17 @@ public:
 	void Jit_NormalS16Morph();
 	void Jit_NormalFloatMorph();
 
+	void Jit_NormalS8MorphSkin();
+	void Jit_NormalS16MorphSkin();
+	void Jit_NormalFloatMorphSkin();
+
 	void Jit_PosS8Morph();
 	void Jit_PosS16Morph();
 	void Jit_PosFloatMorph();
+
+	void Jit_PosS8MorphSkin();
+	void Jit_PosS16MorphSkin();
+	void Jit_PosFloatMorphSkin();
 
 	void Jit_Color8888Morph();
 	void Jit_Color4444Morph();
@@ -697,7 +593,7 @@ private:
 	void Jit_AnyS16Morph(int srcoff, int dstoff);
 	void Jit_AnyFloatMorph(int srcoff, int dstoff);
 
-	const VertexDecoder *dec_;
+	const VertexDecoder *dec_ = nullptr;
 #if PPSSPP_ARCH(ARM64)
 	Arm64Gen::ARM64FloatEmitter fp;
 #endif

@@ -305,6 +305,8 @@ void RegisterAllModules() {
 	Register_sceOpenPSID_driver();
 	Register_semaphore();
 	Register_sceDdrdb();
+	Register_mp4msv();
+	Register_InterruptManagerForKernel();
 	// add new modules here.
 }
 

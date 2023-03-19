@@ -55,7 +55,7 @@ extern float vfpu_cos(float);
 extern void vfpu_sincos(float, float&, float&);
 
 inline float vfpu_asin(float angle) {
-	return asinf(angle) / M_PI_2;
+	return (float)(asinf(angle) / M_PI_2);
 }
 
 inline float vfpu_clamp(float v, float min, float max) {
@@ -63,7 +63,7 @@ inline float vfpu_clamp(float v, float min, float max) {
 	return v >= max ? max : (v <= min ? min : v);
 }
 
-float vfpu_dot(float a[4], float b[4]);
+float vfpu_dot(const float a[4], const float b[4]);
 float vfpu_sqrt(float a);
 float vfpu_rsqrt(float a);
 

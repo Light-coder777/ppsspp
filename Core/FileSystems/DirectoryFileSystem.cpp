@@ -50,6 +50,9 @@
 #ifdef _WIN32
 #include "Common/CommonWindows.h"
 #include <sys/stat.h>
+#if PPSSPP_PLATFORM(UWP)
+#include <fileapifromapp.h>
+#endif
 #undef FILE_OPEN
 #else
 #include <dirent.h>
@@ -85,7 +88,7 @@ Path DirectoryFileHandle::GetLocalPath(const Path &basePath, std::string localpa
 		localpath.erase(0, 1);
 
 	if (fileSystemFlags_ & FileSystemFlags::STRIP_PSP) {
-		if (startsWith(localpath, "PSP/")) {
+		if (startsWithNoCase(localpath, "PSP/")) {
 			localpath = localpath.substr(4);
 		}
 	}
@@ -101,7 +104,7 @@ Path DirectoryFileSystem::GetLocalPath(std::string internalPath) const {
 		internalPath.erase(0, 1);
 
 	if (flags & FileSystemFlags::STRIP_PSP) {
-		if (startsWith(internalPath, "PSP/")) {
+		if (startsWithNoCase(internalPath, "PSP/")) {
 			internalPath = internalPath.substr(4);
 		}
 	}
@@ -111,6 +114,11 @@ Path DirectoryFileSystem::GetLocalPath(std::string internalPath) const {
 
 bool DirectoryFileHandle::Open(const Path &basePath, std::string &fileName, FileAccess access, u32 &error) {
 	error = 0;
+
+	if (access == FILEACCESS_NONE) {
+		error = SCE_KERNEL_ERROR_ERRNO_INVALID_ARGUMENT;
+		return false;
+	}
 
 #if HOST_IS_CASE_SENSITIVE
 	if (access & (FILEACCESS_APPEND | FILEACCESS_CREATE | FILEACCESS_WRITE)) {
@@ -158,7 +166,7 @@ bool DirectoryFileHandle::Open(const Path &basePath, std::string &fileName, File
 
 	// Let's do it!
 #if PPSSPP_PLATFORM(UWP)
-	hFile = CreateFile2(fullName.ToWString().c_str(), desired, sharemode, openmode, nullptr);
+	hFile = CreateFile2FromAppW(fullName.ToWString().c_str(), desired, sharemode, openmode, nullptr);
 #else
 	hFile = CreateFile(fullName.ToWString().c_str(), desired, sharemode, 0, openmode, 0, 0);
 #endif
@@ -170,7 +178,7 @@ bool DirectoryFileHandle::Open(const Path &basePath, std::string &fileName, File
 			// Sometimes, the file is locked for write, let's try again.
 			sharemode |= FILE_SHARE_WRITE;
 #if PPSSPP_PLATFORM(UWP)
-			hFile = CreateFile2(fullName.ToWString().c_str(), desired, sharemode, openmode, nullptr);
+			hFile = CreateFile2FromAppW(fullName.ToWString().c_str(), desired, sharemode, openmode, nullptr);
 #else
 			hFile = CreateFile(fullName.ToWString().c_str(), desired, sharemode, 0, openmode, 0, 0);
 #endif
@@ -201,12 +209,14 @@ bool DirectoryFileHandle::Open(const Path &basePath, std::string &fileName, File
 			flags |= File::OPEN_APPEND;
 		if (access & FILEACCESS_CREATE)
 			flags |= File::OPEN_CREATE;
+		// Important: don't pass TRUNCATE here, the PSP truncates weirdly.  See #579.
+		// See above about truncate behavior.  Just add READ to preserve data here.
 		if (access & FILEACCESS_TRUNCATE)
-			flags |= File::OPEN_TRUNCATE;
+			flags |= File::OPEN_READ;
 
 		int fd = File::OpenFD(fullName, (File::OpenFlag)flags);
 		// Try to detect reads/writes to PSP/GAME to avoid them in replays.
-		if (fullName.FilePathContains("PSP/GAME/")) {
+		if (fullName.FilePathContainsNoCase("PSP/GAME/")) {
 			inGameDir_ = true;
 		}
 		hFile = fd;
@@ -287,7 +297,7 @@ bool DirectoryFileHandle::Open(const Path &basePath, std::string &fileName, File
 #endif
 
 	// Try to detect reads/writes to PSP/GAME to avoid them in replays.
-	if (fullName.FilePathContains("PSP/GAME/")) {
+	if (fullName.FilePathContainsNoCase("PSP/GAME/")) {
 		inGameDir_ = true;
 	}
 	if (access & (FILEACCESS_APPEND | FILEACCESS_CREATE | FILEACCESS_WRITE)) {
@@ -551,7 +561,7 @@ int DirectoryFileSystem::OpenFile(std::string filename, FileAccess access, const
 	OpenFileEntry entry;
 	entry.hFile.fileSystemFlags_ = flags;
 	u32 err = 0;
-	bool success = entry.hFile.Open(basePath, filename, access, err);
+	bool success = entry.hFile.Open(basePath, filename, (FileAccess)(access & FILEACCESS_PSP_FLAGS), err);
 	if (err == 0 && !success) {
 		err = SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND;
 	}
@@ -567,7 +577,9 @@ int DirectoryFileSystem::OpenFile(std::string filename, FileAccess access, const
 #else
 		logError = (int)errno;
 #endif
-		ERROR_LOG(FILESYS, "DirectoryFileSystem::OpenFile('%s'): FAILED, %d - access = %d '%s'", filename.c_str(), logError, (int)access, errorString.c_str());
+		if (!(access & FILEACCESS_PPSSPP_QUIET)) {
+			ERROR_LOG(FILESYS, "DirectoryFileSystem::OpenFile('%s'): FAILED, %d - access = %d '%s'", filename.c_str(), logError, (int)(access & FILEACCESS_PSP_FLAGS), errorString.c_str());
+		}
 		return err;
 	} else {
 #ifdef _WIN32
@@ -579,7 +591,7 @@ int DirectoryFileSystem::OpenFile(std::string filename, FileAccess access, const
 		u32 newHandle = hAlloc->GetNewHandle();
 
 		entry.guestFilename = filename;
-		entry.access = access;
+		entry.access = (FileAccess)(access & FILEACCESS_PSP_FLAGS);
 
 		entries[newHandle] = entry;
 
@@ -666,40 +678,34 @@ PSPFileInfo DirectoryFileSystem::GetFileInfo(std::string filename) {
 	PSPFileInfo x;
 	x.name = filename;
 
+	File::FileInfo info;
 	Path fullName = GetLocalPath(filename);
-	if (!File::Exists(fullName)) {
+	if (!File::GetFileInfo(fullName, &info)) {
 #if HOST_IS_CASE_SENSITIVE
 		if (! FixPathCase(basePath, filename, FPC_FILE_MUST_EXIST))
 			return ReplayApplyDiskFileInfo(x, CoreTiming::GetGlobalTimeUs());
 		fullName = GetLocalPath(filename);
 
-		if (! File::Exists(fullName))
+		if (!File::GetFileInfo(fullName, &info))
 			return ReplayApplyDiskFileInfo(x, CoreTiming::GetGlobalTimeUs());
 #else
 		return ReplayApplyDiskFileInfo(x, CoreTiming::GetGlobalTimeUs());
 #endif
 	}
 
-	// TODO: Consolidate to just a File::GetFileInfo call.
-
-	x.type = File::IsDirectory(fullName) ? FILETYPE_DIRECTORY : FILETYPE_NORMAL;
+	x.type = info.isDirectory ? FILETYPE_DIRECTORY : FILETYPE_NORMAL;
 	x.exists = true;
 
 	if (x.type != FILETYPE_DIRECTORY) {
-		File::FileInfo info;
-		if (!File::GetFileInfo(fullName, &info)) {
-			ERROR_LOG(FILESYS, "DirectoryFileSystem::GetFileInfo: GetFileInfo failed: %s", fullName.c_str());
-		} else {
-			x.size = info.size;
-			x.access = info.access;
-			time_t atime = info.atime;
-			time_t ctime = info.ctime;
-			time_t mtime = info.mtime;
+		x.size = info.size;
+		x.access = info.access;
+		time_t atime = info.atime;
+		time_t ctime = info.ctime;
+		time_t mtime = info.mtime;
 
-			localtime_r((time_t*)&atime, &x.atime);
-			localtime_r((time_t*)&ctime, &x.ctime);
-			localtime_r((time_t*)&mtime, &x.mtime);
-		}
+		localtime_r((time_t*)&atime, &x.atime);
+		localtime_r((time_t*)&ctime, &x.ctime);
+		localtime_r((time_t*)&mtime, &x.mtime);
 	}
 
 	return ReplayApplyDiskFileInfo(x, CoreTiming::GetGlobalTimeUs());
@@ -708,7 +714,7 @@ PSPFileInfo DirectoryFileSystem::GetFileInfo(std::string filename) {
 #ifdef _WIN32
 #define FILETIME_FROM_UNIX_EPOCH_US 11644473600000000ULL
 
-static void tmFromFiletime(tm &dest, FILETIME &src) {
+static void tmFromFiletime(tm &dest, const FILETIME &src) {
 	u64 from_1601_us = (((u64) src.dwHighDateTime << 32ULL) + (u64) src.dwLowDateTime) / 10ULL;
 	u64 from_1970_us = from_1601_us - FILETIME_FROM_UNIX_EPOCH_US;
 
@@ -790,25 +796,28 @@ bool DirectoryFileSystem::ComputeRecursiveDirSizeIfFast(const std::string &path,
 	}
 }
 
-std::vector<PSPFileInfo> DirectoryFileSystem::GetDirListing(std::string path) {
+std::vector<PSPFileInfo> DirectoryFileSystem::GetDirListing(const std::string &path, bool *exists) {
 	std::vector<PSPFileInfo> myVector;
 
 	std::vector<File::FileInfo> files;
 	Path localPath = GetLocalPath(path);
 	const int flags = File::GETFILES_GETHIDDEN | File::GETFILES_GET_NAVIGATION_ENTRIES;
-	if (!File::GetFilesInDir(localPath, &files, nullptr, flags)) {
-		// TODO: Case sensitivity should be checked on a file system basis, right?
+	bool success = File::GetFilesInDir(localPath, &files, nullptr, flags);
 #if HOST_IS_CASE_SENSITIVE
-		if (FixPathCase(basePath, path, FPC_FILE_MUST_EXIST)) {
+	if (!success) {
+		// TODO: Case sensitivity should be checked on a file system basis, right?
+		std::string fixedPath = path;
+		if (FixPathCase(basePath, fixedPath, FPC_FILE_MUST_EXIST)) {
 			// May have failed due to case sensitivity, try again
-			localPath = GetLocalPath(path);
-			if (!File::GetFilesInDir(localPath, &files, nullptr, 0)) {
-				return ReplayApplyDiskListing(myVector, CoreTiming::GetGlobalTimeUs());
-			}
+			localPath = GetLocalPath(fixedPath);
+			success = File::GetFilesInDir(localPath, &files, nullptr, flags);
 		}
-#else
-		return ReplayApplyDiskListing(myVector, CoreTiming::GetGlobalTimeUs());
+	}
 #endif
+	if (!success) {
+		if (exists)
+			*exists = false;
+		return ReplayApplyDiskListing(myVector, CoreTiming::GetGlobalTimeUs());
 	}
 
 	bool hideISOFiles = PSP_CoreParameter().compat.flags().HideISOFiles;
@@ -836,6 +845,7 @@ std::vector<PSPFileInfo> DirectoryFileSystem::GetDirListing(std::string path) {
 			entry.type = FILETYPE_NORMAL;
 		}
 		entry.access = file.access;
+		entry.exists = file.exists;
 
 		localtime_r((time_t*)&file.atime, &entry.atime);
 		localtime_r((time_t*)&file.ctime, &entry.ctime);
@@ -844,6 +854,8 @@ std::vector<PSPFileInfo> DirectoryFileSystem::GetDirListing(std::string path) {
 		myVector.push_back(entry);
 	}
 
+	if (exists)
+		*exists = true;
 	return ReplayApplyDiskListing(myVector, CoreTiming::GetGlobalTimeUs());
 }
 
@@ -970,7 +982,7 @@ int VFSFileSystem::OpenFile(std::string filename, FileAccess access, const char 
 	VERBOSE_LOG(FILESYS, "VFSFileSystem actually opening %s (%s)", fullNameC, filename.c_str());
 
 	size_t size;
-	u8 *data = VFSReadFile(fullNameC, &size);
+	u8 *data = g_VFS.ReadFile(fullNameC, &size);
 	if (!data) {
 		ERROR_LOG(FILESYS, "VFSFileSystem failed to open %s", filename.c_str());
 		return SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND;
@@ -991,7 +1003,7 @@ PSPFileInfo VFSFileSystem::GetFileInfo(std::string filename) {
 
 	std::string fullName = GetLocalPath(filename);
 	File::FileInfo fo;
-	if (VFSGetFileInfo(fullName.c_str(), &fo)) {
+	if (g_VFS.GetFileInfo(fullName.c_str(), &fo)) {
 		x.exists = fo.exists;
 		if (x.exists) {
 			x.size = fo.size;
@@ -1074,9 +1086,11 @@ size_t VFSFileSystem::SeekFile(u32 handle, s32 position, FileMove type) {
 	}
 }
 
-std::vector<PSPFileInfo> VFSFileSystem::GetDirListing(std::string path) {
+std::vector<PSPFileInfo> VFSFileSystem::GetDirListing(const std::string &path, bool *exists) {
 	std::vector<PSPFileInfo> myVector;
 	// TODO
+	if (exists)
+		*exists = false;
 	return myVector;
 }
 

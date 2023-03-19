@@ -98,9 +98,10 @@ void FakeJit::ClearCache()
 	//GenerateFixedCode();
 }
 
-void FakeJit::InvalidateCacheAt(u32 em_address, int length)
-{
-	blocks.InvalidateICache(em_address, length);
+void FakeJit::InvalidateCacheAt(u32 em_address, int length) {
+	if (blocks.RangeMayHaveEmuHacks(em_address, em_address + length)) {
+		blocks.InvalidateICache(em_address, length);
+	}
 }
 
 void FakeJit::EatInstruction(MIPSOpcode op) {
@@ -125,14 +126,13 @@ void FakeJit::CompileDelaySlot(int flags)
 void FakeJit::Compile(u32 em_address) {
 }
 
-void FakeJit::RunLoopUntil(u64 globalticks)
-{
-	((void (*)())enterCode)();
+void FakeJit::RunLoopUntil(u64 globalticks) {
+	MIPSInterpret_RunUntil(globalticks);
 }
 
-const u8 *FakeJit::DoJit(u32 em_address, JitBlock *b)
-{
-	return b->normalEntry;
+const u8 *FakeJit::DoJit(u32 em_address, JitBlock *b) {
+	_assert_(false);
+	return nullptr;
 }
 
 void FakeJit::AddContinuedBlock(u32 dest)

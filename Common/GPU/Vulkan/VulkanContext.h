@@ -4,11 +4,21 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <functional>
 
 #include "Common/Log.h"
 #include "Common/GPU/Vulkan/VulkanLoader.h"
 #include "Common/GPU/Vulkan/VulkanDebug.h"
 #include "Common/GPU/Vulkan/VulkanAlloc.h"
+#include "Common/GPU/Vulkan/VulkanProfiler.h"
+
+// Enable or disable a simple logging profiler for Vulkan.
+// Mostly useful for profiling texture uploads currently, but could be useful for
+// other things as well. We also have a nice integrated render pass profiler in the queue
+// runner, but this one is more convenient for transient events.
+
+#define VK_PROFILE_BEGIN(vulkan, cmd, stage, ...) vulkan->GetProfiler()->Begin(cmd, stage, __VA_ARGS__);
+#define VK_PROFILE_END(vulkan, cmd, stage) vulkan->GetProfiler()->End(cmd, stage);
 
 enum {
 	VULKAN_FLAG_VALIDATE = 1,
@@ -25,6 +35,7 @@ enum {
 	VULKAN_VENDOR_ARM = 0x000013B5,  // Mali
 	VULKAN_VENDOR_QUALCOMM = 0x00005143,
 	VULKAN_VENDOR_IMGTEC = 0x00001010,  // PowerVR
+	VULKAN_VENDOR_APPLE = 0x0000106b,  // Apple through MoltenVK
 };
 
 VK_DEFINE_HANDLE(VmaAllocator);
@@ -62,6 +73,15 @@ struct VulkanPhysicalDeviceInfo {
 	bool canBlitToPreferredDepthStencilFormat;
 };
 
+class VulkanProfiler;
+class VulkanContext;
+
+// Extremely rough split of capabilities.
+enum class PerfClass {
+	SLOW,
+	FAST,
+};
+
 // This is a bit repetitive...
 class VulkanDeleteList {
 	struct BufferWithAlloc {
@@ -74,11 +94,11 @@ class VulkanDeleteList {
 	};
 
 	struct Callback {
-		explicit Callback(void(*f)(void *userdata), void *u)
+		explicit Callback(void(*f)(VulkanContext *vulkan, void *userdata), void *u)
 			: func(f), userdata(u) {
 		}
 
-		void(*func)(void *userdata);
+		void (*func)(VulkanContext *vulkan, void *userdata);
 		void *userdata;
 	};
 
@@ -98,7 +118,8 @@ public:
 	void QueueDeleteFramebuffer(VkFramebuffer &framebuffer) { _dbg_assert_(framebuffer != VK_NULL_HANDLE); framebuffers_.push_back(framebuffer); framebuffer = VK_NULL_HANDLE; }
 	void QueueDeletePipelineLayout(VkPipelineLayout &pipelineLayout) { _dbg_assert_(pipelineLayout != VK_NULL_HANDLE); pipelineLayouts_.push_back(pipelineLayout); pipelineLayout = VK_NULL_HANDLE; }
 	void QueueDeleteDescriptorSetLayout(VkDescriptorSetLayout &descSetLayout) { _dbg_assert_(descSetLayout != VK_NULL_HANDLE); descSetLayouts_.push_back(descSetLayout); descSetLayout = VK_NULL_HANDLE; }
-	void QueueCallback(void(*func)(void *userdata), void *userdata) { callbacks_.push_back(Callback(func, userdata)); }
+	void QueueDeleteQueryPool(VkQueryPool &queryPool) { _dbg_assert_(queryPool != VK_NULL_HANDLE); queryPools_.push_back(queryPool); queryPool = VK_NULL_HANDLE; }
+	void QueueCallback(void (*func)(VulkanContext *vulkan, void *userdata), void *userdata) { callbacks_.push_back(Callback(func, userdata)); }
 
 	void QueueDeleteBufferAllocation(VkBuffer &buffer, VmaAllocation &alloc) { 
 		_dbg_assert_(buffer != VK_NULL_HANDLE); 
@@ -114,7 +135,7 @@ public:
 	}
 
 	void Take(VulkanDeleteList &del);
-	void PerformDeletes(VkDevice device, VmaAllocator allocator);
+	void PerformDeletes(VulkanContext *vulkan, VmaAllocator allocator);
 
 private:
 	std::vector<VkCommandPool> cmdPools_;
@@ -133,6 +154,7 @@ private:
 	std::vector<VkFramebuffer> framebuffers_;
 	std::vector<VkPipelineLayout> pipelineLayouts_;
 	std::vector<VkDescriptorSetLayout> descSetLayouts_;
+	std::vector<VkQueryPool> queryPools_;
 	std::vector<Callback> callbacks_;
 };
 
@@ -154,6 +176,7 @@ public:
 	int GetBestPhysicalDevice();
 	int GetPhysicalDeviceByName(std::string name);
 	void ChooseDevice(int physical_device);
+	bool EnableInstanceExtension(const char *extension);
 	bool EnableDeviceExtension(const char *extension);
 	VkResult CreateDevice();
 
@@ -172,6 +195,7 @@ public:
 	VkResult ReinitSurface();
 
 	bool InitSwapchain();
+	void SetCbGetDrawSize(std::function<VkExtent2D()>);
 
 	void DestroySwapchain();
 	void DestroySurface();
@@ -183,20 +207,28 @@ public:
 
 	// Utility functions for shorter code
 	VkFence CreateFence(bool presignalled);
-	bool CreateShaderModule(const std::vector<uint32_t> &spirv, VkShaderModule *shaderModule);
+	bool CreateShaderModule(const std::vector<uint32_t> &spirv, VkShaderModule *shaderModule, const char *tag);
 
 	int GetBackbufferWidth() { return (int)swapChainExtent_.width; }
 	int GetBackbufferHeight() { return (int)swapChainExtent_.height; }
 
-	void BeginFrame();
+	void BeginFrame(VkCommandBuffer firstCommandBuffer);
 	void EndFrame();
+
+	VulkanProfiler *GetProfiler() {
+		return &frame_[curFrame_].profiler;
+	}
 
 	// Simple workaround for the casting warning.
 	template <class T>
 	void SetDebugName(T handle, VkObjectType type, const char *name) {
-		if (extensionsLookup_.EXT_debug_utils) {
+		if (extensionsLookup_.EXT_debug_utils && handle != VK_NULL_HANDLE) {
+			_dbg_assert_(handle != VK_NULL_HANDLE);
 			SetDebugNameImpl((uint64_t)handle, type, name);
 		}
+	}
+	bool DebugLayerEnabled() const {
+		return extensionsLookup_.EXT_debug_utils;
 	}
 
 	bool MemoryTypeFromProperties(uint32_t typeBits, VkFlags requirements_mask, uint32_t *typeIndex);
@@ -226,6 +258,12 @@ public:
 		VkPhysicalDeviceProperties properties;
 		VkPhysicalDevicePushDescriptorPropertiesKHR pushDescriptorProperties;
 		VkPhysicalDeviceExternalMemoryHostPropertiesEXT externalMemoryHostProperties;
+		VkPhysicalDeviceDepthStencilResolveProperties depthStencilResolve;
+	};
+
+	struct AllPhysicalDeviceFeatures {
+		VkPhysicalDeviceFeatures standard;
+		VkPhysicalDeviceMultiviewFeatures multiview;
 	};
 
 	const PhysicalDeviceProps &GetPhysicalDeviceProperties(int i = -1) const {
@@ -251,20 +289,35 @@ public:
 		return device_extensions_enabled_;
 	}
 
+	const VkPhysicalDeviceMemoryProperties &GetMemoryProperties() const {
+		return memory_properties_;
+	}
+
 	struct PhysicalDeviceFeatures {
-		VkPhysicalDeviceFeatures available{};
-		VkPhysicalDeviceFeatures enabled{};
+		AllPhysicalDeviceFeatures available{};
+		AllPhysicalDeviceFeatures enabled{};
 	};
 
 	const PhysicalDeviceFeatures &GetDeviceFeatures() const { return deviceFeatures_; }
 	const VulkanPhysicalDeviceInfo &GetDeviceInfo() const { return deviceInfo_; }
 	const VkSurfaceCapabilitiesKHR &GetSurfaceCapabilities() const { return surfCapabilities_; }
 
-	bool IsInstanceExtensionAvailable(const char *name) const {
-		for (auto &iter : instance_extension_properties_) {
-			if (!strcmp(name, iter.extensionName))
+	bool IsInstanceExtensionAvailable(const char *extensionName) const {
+		for (const auto &iter : instance_extension_properties_) {
+			if (!strcmp(extensionName, iter.extensionName))
 				return true;
 		}
+
+		// Also search through the layers, one of them might carry the extension (especially DEBUG_utils)
+		for (const auto &iter : instance_layer_properties_) {
+			for (const auto &ext : iter.extensions) {
+				if (!strcmp(extensionName, ext.extensionName)) {
+					INFO_LOG(G3D, "%s found in layer extensions: %s", extensionName, iter.properties.layerName);
+					return true;
+				}
+			}
+		}
+
 		return false;
 	}
 
@@ -277,6 +330,7 @@ public:
 	}
 
 	int GetInflightFrames() const {
+		// out of MAX_INFLIGHT_FRAMES.
 		return inflightFrames_;
 	}
 	// Don't call while a frame is in progress.
@@ -293,6 +347,12 @@ public:
 		return swapchainFormat_;
 	}
 
+	void SetProfilerEnabledPtr(bool *enabled) {
+		for (auto &frame : frame_) {
+			frame.profiler.SetEnabledPtr(enabled);
+		}
+	}
+
 	// 1 for no frame overlap and thus minimal latency but worst performance.
 	// 2 is an OK compromise, while 3 performs best but risks slightly higher latency.
 	enum {
@@ -301,10 +361,18 @@ public:
 
 	const VulkanExtensions &Extensions() { return extensionsLookup_; }
 
+	PerfClass DevicePerfClass() const {
+		return devicePerfClass_;
+	}
+
 	void GetImageMemoryRequirements(VkImage image, VkMemoryRequirements *mem_reqs, bool *dedicatedAllocation);
 
 	VmaAllocator Allocator() const {
 		return allocator_;
+	}
+
+	const std::vector<VkSurfaceFormatKHR> &SurfaceFormats() {
+		return surfFormats_;
 	}
 
 private:
@@ -323,10 +391,12 @@ private:
 	bool CheckLayers(const std::vector<LayerProperties> &layer_props, const std::vector<const char *> &layer_names) const;
 
 	WindowSystem winsys_;
+
 	// Don't use the real types here to avoid having to include platform-specific stuff
 	// that we really don't want in everything that uses VulkanContext.
-	void *winsysData1_;
-	void *winsysData2_;
+	void *winsysData1_ = nullptr;
+	void *winsysData2_ = nullptr;
+	std::function<VkExtent2D()> cbGetDrawSize_;
 
 	VkInstance instance_ = VK_NULL_HANDLE;
 	VkDevice device_ = VK_NULL_HANDLE;
@@ -354,7 +424,8 @@ private:
 	uint32_t graphics_queue_family_index_ = -1;
 	std::vector<PhysicalDeviceProps> physicalDeviceProperties_;
 	std::vector<VkQueueFamilyProperties> queueFamilyProperties_;
-	VkPhysicalDeviceMemoryProperties memory_properties{};
+
+	VkPhysicalDeviceMemoryProperties memory_properties_{};
 
 	// Custom collection of things that are good to know
 	VulkanPhysicalDeviceInfo deviceInfo_{};
@@ -363,12 +434,14 @@ private:
 	VkExtent2D swapChainExtent_{};
 
 	int flags_ = 0;
+	PerfClass devicePerfClass_ = PerfClass::SLOW;
 
 	int inflightFrames_ = MAX_INFLIGHT_FRAMES;
 
 	struct FrameData {
 		FrameData() {}
 		VulkanDeleteList deleteList;
+		VulkanProfiler profiler;
 	};
 	FrameData frame_[MAX_INFLIGHT_FRAMES];
 	int curFrame_ = 0;
@@ -387,6 +460,7 @@ private:
 	PhysicalDeviceFeatures deviceFeatures_;
 
 	VkSurfaceCapabilitiesKHR surfCapabilities_{};
+	std::vector<VkSurfaceFormatKHR> surfFormats_{};
 
 	std::vector<VkCommandBuffer> cmdQueue_;
 
@@ -394,7 +468,7 @@ private:
 };
 
 // Detailed control.
-void TransitionImageLayout2(VkCommandBuffer cmd, VkImage image, int baseMip, int mipLevels, VkImageAspectFlags aspectMask,
+void TransitionImageLayout2(VkCommandBuffer cmd, VkImage image, int baseMip, int mipLevels, int numLayers, VkImageAspectFlags aspectMask,
 	VkImageLayout oldImageLayout, VkImageLayout newImageLayout,
 	VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
 	VkAccessFlags srcAccessMask, VkAccessFlags dstAccessMask);
@@ -411,7 +485,9 @@ enum class GLSLVariant {
 
 bool GLSLtoSPV(const VkShaderStageFlagBits shader_type, const char *sourceCode, GLSLVariant variant, std::vector<uint32_t> &spirv, std::string *errorMessage);
 
-const char *VulkanResultToString(VkResult res);
+const char *VulkanColorSpaceToString(VkColorSpaceKHR colorSpace);
+const char *VulkanFormatToString(VkFormat format);
+
 std::string FormatDriverVersion(const VkPhysicalDeviceProperties &props);
 
 // Simple heuristic.

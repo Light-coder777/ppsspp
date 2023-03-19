@@ -27,7 +27,6 @@
 #include "GPU/Common/GPUStateUtils.h"
 #include "Core/System.h"
 #include "Core/Config.h"
-#include "Core/Reporting.h"
 #include "GPU/Vulkan/GPU_Vulkan.h"
 #include "GPU/Vulkan/PipelineManagerVulkan.h"
 #include "GPU/Vulkan/FramebufferManagerVulkan.h"
@@ -122,11 +121,6 @@ static const VkLogicOp logicOps[] = {
 	VK_LOGIC_OP_SET,
 };
 
-void DrawEngineVulkan::ResetFramebufferRead() {
-	boundSecondary_ = VK_NULL_HANDLE;
-}
-
-// TODO: Do this more progressively. No need to compute the entire state if the entire state hasn't changed.
 // In Vulkan, we simply collect all the state together into a "pipeline key" - we don't actually set any state here
 // (the caller is responsible for setting the little dynamic state that is supported, dynState).
 void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManager, ShaderManagerVulkan *shaderManager, int prim, VulkanPipelineRasterStateKey &key, VulkanDynamicState &dynState) {
@@ -135,7 +129,6 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 	bool useBufferedRendering = framebufferManager_->UseBufferedRendering();
 
 	if (gstate_c.IsDirty(DIRTY_BLEND_STATE)) {
-		gstate_c.SetAllowFramebufferRead(!g_Config.bDisableSlowFramebufEffects);
 		if (gstate.isModeClear()) {
 			key.logicOpEnable = false;
 			key.logicOp = VK_LOGIC_OP_CLEAR;
@@ -153,38 +146,28 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 			bool alphaMask = gstate.isClearModeAlphaMask();
 			key.colorWriteMask = (colorMask ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT) : 0) | (alphaMask ? VK_COLOR_COMPONENT_A_BIT : 0);
 		} else {
-			if (gstate_c.Supports(GPU_SUPPORTS_LOGIC_OP) && gstate.isLogicOpEnabled() && gstate.getLogicOp() != GE_LOGIC_COPY) {
-				key.logicOpEnable = true;
-				key.logicOp = logicOps[gstate.getLogicOp()];
+			pipelineState_.Convert(draw_->GetShaderLanguageDesc().bitwiseOps);
+			GenericMaskState &maskState = pipelineState_.maskState;
+			GenericBlendState &blendState = pipelineState_.blendState;
+			GenericLogicState &logicState = pipelineState_.logicState;
+
+			if (pipelineState_.FramebufferRead() && useBufferedRendering) {
+				ApplyFramebufferRead(&fboTexBindState_);
+				// The shader takes over the responsibility for blending, so recompute.
+				// We might still end up using blend to write something to alpha.
+				ApplyStencilReplaceAndLogicOpIgnoreBlend(blendState.replaceAlphaWithStencil, blendState);
+				dirtyRequiresRecheck_ |= DIRTY_FRAGMENTSHADER_STATE;
+				gstate_c.Dirty(DIRTY_FRAGMENTSHADER_STATE);
 			} else {
-				key.logicOpEnable = false;
-				key.logicOp = VK_LOGIC_OP_CLEAR;
-			}
-
-			// Set blend - unless we need to do it in the shader.
-			GenericBlendState blendState;
-			ConvertBlendState(blendState, gstate_c.allowFramebufferRead);
-
-			GenericMaskState maskState;
-			ConvertMaskState(maskState, gstate_c.allowFramebufferRead);
-
-			if (blendState.applyFramebufferRead || maskState.applyFramebufferRead) {
-				if (ApplyFramebufferRead(&fboTexNeedsBind_)) {
-					// The shader takes over the responsibility for blending, so recompute.
-					ApplyStencilReplaceAndLogicOpIgnoreBlend(blendState.replaceAlphaWithStencil, blendState);
-				} else {
-					// Until next time, force it off.
-					ResetFramebufferRead();
-					gstate_c.SetAllowFramebufferRead(false);
-					// Make sure we recompute the fragment shader ID to one that doesn't try to use shader blending.
+				if (fboTexBound_) {
+					boundSecondary_ = VK_NULL_HANDLE;
+					fboTexBound_ = false;
+					dirtyRequiresRecheck_ |= DIRTY_FRAGMENTSHADER_STATE;
+					gstate_c.Dirty(DIRTY_FRAGMENTSHADER_STATE);
 				}
-				gstate_c.Dirty(DIRTY_FRAGMENTSHADER_STATE);
-			} else if (blendState.resetFramebufferRead) {
-				ResetFramebufferRead();
-				gstate_c.Dirty(DIRTY_FRAGMENTSHADER_STATE);
 			}
 
-			if (blendState.enabled) {
+			if (blendState.blendEnabled) {
 				key.blendEnable = true;
 				key.blendOpColor = vkBlendEqLookup[(size_t)blendState.eqColor];
 				key.blendOpAlpha = vkBlendEqLookup[(size_t)blendState.eqAlpha];
@@ -193,6 +176,7 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 				key.destColor = vkBlendFactorLookup[(size_t)blendState.dstColor];
 				key.destAlpha = vkBlendFactorLookup[(size_t)blendState.dstAlpha];
 				if (blendState.dirtyShaderBlendFixValues) {
+					dirtyRequiresRecheck_ |= DIRTY_SHADERBLEND;
 					gstate_c.Dirty(DIRTY_SHADERBLEND);
 				}
 				dynState.useBlendColor = blendState.useBlendColor;
@@ -210,20 +194,25 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 				dynState.useBlendColor = false;
 			}
 
-			key.colorWriteMask =
-				(maskState.rgba[0] ? VK_COLOR_COMPONENT_R_BIT : 0) |
-				(maskState.rgba[1] ? VK_COLOR_COMPONENT_G_BIT : 0) |
-				(maskState.rgba[2] ? VK_COLOR_COMPONENT_B_BIT : 0) |
-				(maskState.rgba[3] ? VK_COLOR_COMPONENT_A_BIT : 0);
+			key.colorWriteMask = maskState.channelMask;  // flags match
+
+			if (logicState.logicOpEnabled) {
+				key.logicOpEnable = true;
+				key.logicOp = logicOps[(int)logicState.logicOp];
+			} else {
+				key.logicOpEnable = false;
+				key.logicOp = VK_LOGIC_OP_COPY;
+			}
 
 			// Workaround proposed in #10421, for bug where the color write mask is not applied correctly on Adreno.
 			if ((gstate.pmskc & 0x00FFFFFF) == 0x00FFFFFF && g_Config.bVendorBugChecksEnabled && draw_->GetBugs().Has(Draw::Bugs::COLORWRITEMASK_BROKEN_WITH_DEPTHTEST)) {
 				key.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 				if (!key.blendEnable) {
+					bool writeAlpha = maskState.channelMask & 8;
 					key.blendEnable = true;
 					key.blendOpAlpha = VK_BLEND_OP_ADD;
-					key.srcAlpha = VK_BLEND_FACTOR_ZERO;
-					key.destAlpha = VK_BLEND_FACTOR_ONE;
+					key.srcAlpha = writeAlpha ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ZERO;
+					key.destAlpha = writeAlpha ? VK_BLEND_FACTOR_ZERO : VK_BLEND_FACTOR_ONE;
 				}
 				key.blendOpColor = VK_BLEND_OP_ADD;
 				key.srcColor = VK_BLEND_FACTOR_ZERO;
@@ -243,7 +232,7 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 			if (gstate.getDepthRangeMin() == 0 || gstate.getDepthRangeMax() == 65535) {
 				// TODO: Still has a bug where we clamp to depth range if one is not the full range.
 				// But the alternate is not clamping in either direction...
-				key.depthClampEnable = gstate.isDepthClampEnabled() && gstate_c.Supports(GPU_SUPPORTS_DEPTH_CLAMP);
+				key.depthClampEnable = gstate.isDepthClampEnabled() && gstate_c.Use(GPU_USE_DEPTH_CLAMP);
 			} else {
 				// We just want to clip in this case, the clamp would be clipped anyway.
 				key.depthClampEnable = false;
@@ -259,9 +248,6 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 			key.depthTestEnable = true;
 			key.depthCompareOp = VK_COMPARE_OP_ALWAYS;
 			key.depthWriteEnable = gstate.isClearModeDepthMask();
-			if (gstate.isClearModeDepthMask()) {
-				fbManager.SetDepthUpdated();
-			}
 
 			// Stencil Test
 			bool alphaMask = gstate.isClearModeAlphaMask();
@@ -288,13 +274,11 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 			}
 		} else {
 			// Depth Test
-			if (gstate.isDepthTestEnabled()) {
+			if (!IsDepthTestEffectivelyDisabled()) {
 				key.depthTestEnable = true;
 				key.depthCompareOp = compareOps[gstate.getDepthTestFunction()];
 				key.depthWriteEnable = gstate.isDepthWriteEnabled();
-				if (gstate.isDepthWriteEnabled()) {
-					fbManager.SetDepthUpdated();
-				}
+				UpdateEverUsedEqualDepth(gstate.getDepthTestFunction());
 			} else {
 				key.depthTestEnable = false;
 				key.depthWriteEnable = false;
@@ -312,6 +296,30 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 				dynState.stencilRef = stencilState.testRef;
 				dynState.stencilCompareMask = stencilState.testMask;
 				dynState.stencilWriteMask = stencilState.writeMask;
+
+				// Nasty special case for Spongebob and similar where it tries to write zeros to alpha/stencil during
+				// depth-fail. We can't write to alpha then because the pixel is killed. However, we can invert the depth
+				// test and modify the alpha function...
+				if (SpongebobDepthInverseConditions(stencilState)) {
+					key.blendEnable = true;
+					key.blendOpAlpha = VK_BLEND_OP_ADD;
+					key.blendOpColor = VK_BLEND_OP_ADD;
+					key.srcColor = VK_BLEND_FACTOR_ZERO;
+					key.destColor = VK_BLEND_FACTOR_ZERO;
+					key.logicOpEnable = false;
+					key.srcAlpha = VK_BLEND_FACTOR_ZERO;
+					key.destAlpha = VK_BLEND_FACTOR_ZERO;
+					key.colorWriteMask = VK_COLOR_COMPONENT_A_BIT;
+					key.depthCompareOp = VK_COMPARE_OP_LESS;  // Inverse of GREATER_EQUAL
+					key.stencilCompareOp = VK_COMPARE_OP_ALWAYS;
+					// Invert
+					key.stencilPassOp = VK_STENCIL_OP_ZERO;
+					key.stencilFailOp = VK_STENCIL_OP_ZERO;
+					key.stencilDepthFailOp = VK_STENCIL_OP_KEEP;
+
+					dirtyRequiresRecheck_ |= DIRTY_BLEND_STATE | DIRTY_DEPTHSTENCIL_STATE;
+					gstate_c.Dirty(DIRTY_BLEND_STATE | DIRTY_DEPTHSTENCIL_STATE);
+				}
 			} else {
 				key.stencilTestEnable = false;
 				key.stencilCompareOp = VK_COMPARE_OP_ALWAYS;
@@ -329,15 +337,13 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 			fbManager.GetRenderWidth(), fbManager.GetRenderHeight(),
 			fbManager.GetTargetBufferWidth(), fbManager.GetTargetBufferHeight(),
 			vpAndScissor);
+		UpdateCachedViewportState(vpAndScissor);
 
 		float depthMin = vpAndScissor.depthRangeMin;
 		float depthMax = vpAndScissor.depthRangeMax;
 
 		if (depthMin < 0.0f) depthMin = 0.0f;
 		if (depthMax > 1.0f) depthMax = 1.0f;
-		if (vpAndScissor.dirtyDepth) {
-			gstate_c.Dirty(DIRTY_DEPTHRANGE);
-		}
 
 		VkViewport &vp = dynState.viewport;
 		vp.x = vpAndScissor.viewportX;
@@ -347,41 +353,44 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 		vp.minDepth = vpAndScissor.depthRangeMin;
 		vp.maxDepth = vpAndScissor.depthRangeMax;
 
-		if (vpAndScissor.dirtyProj) {
-			gstate_c.Dirty(DIRTY_PROJMATRIX);
-		}
-
-		VkRect2D &scissor = dynState.scissor;
-		if (vpAndScissor.scissorEnable) {
-			scissor.offset.x = vpAndScissor.scissorX;
-			scissor.offset.y = vpAndScissor.scissorY;
-			scissor.extent.width = std::max(0, vpAndScissor.scissorW);
-			scissor.extent.height = std::max(0, vpAndScissor.scissorH);
-		} else {
-			scissor.offset.x = 0;
-			scissor.offset.y = 0;
-			scissor.extent.width = framebufferManager_->GetRenderWidth();
-			scissor.extent.height = framebufferManager_->GetRenderHeight();
-		}
+		ScissorRect &scissor = dynState.scissor;
+		scissor.x = vpAndScissor.scissorX;
+		scissor.y = vpAndScissor.scissorY;
+		scissor.width = std::max(0, vpAndScissor.scissorW);
+		scissor.height = std::max(0, vpAndScissor.scissorH);
 	}
 }
 
 void DrawEngineVulkan::BindShaderBlendTex() {
-	// TODO:  At this point, we know if the vertices are full alpha or not.
+	// TODO: At this point, we know if the vertices are full alpha or not.
 	// Set the nearest/linear here (since we correctly know if alpha/color tests are needed)?
 	if (!gstate.isModeClear()) {
-		if (fboTexNeedsBind_) {
-			framebufferManager_->BindFramebufferAsColorTexture(1, framebufferManager_->GetCurrentRenderVFB(), BINDFBCOLOR_MAY_COPY);
+		if (fboTexBindState_ == FBO_TEX_COPY_BIND_TEX) {
+			VirtualFramebuffer *curRenderVfb = framebufferManager_->GetCurrentRenderVFB();
+			bool bindResult = framebufferManager_->BindFramebufferAsColorTexture(1, curRenderVfb, BINDFBCOLOR_MAY_COPY, Draw::ALL_LAYERS);
+			_dbg_assert_(bindResult);
 			boundSecondary_ = (VkImageView)draw_->GetNativeObject(Draw::NativeObject::BOUND_TEXTURE1_IMAGEVIEW);
+			boundSecondaryIsInputAttachment_ = false;
 			fboTexBound_ = true;
-			fboTexNeedsBind_ = false;
+			fboTexBindState_ = FBO_TEX_NONE;
+
+			// Must dirty blend state here so we re-copy next time.  Example: Lunar's spell effects.
+			dirtyRequiresRecheck_ |= DIRTY_BLEND_STATE;
+		} else if (fboTexBindState_ == FBO_TEX_READ_FRAMEBUFFER) {
+			draw_->BindCurrentFramebufferForColorInput();
+			boundSecondary_ = (VkImageView)draw_->GetNativeObject(Draw::NativeObject::BOUND_FRAMEBUFFER_COLOR_IMAGEVIEW_RT, (void *)0);
+			boundSecondaryIsInputAttachment_ = true;
+			fboTexBindState_ = FBO_TEX_NONE;
+		} else {
+			boundSecondaryIsInputAttachment_ = false;
+			boundSecondary_ = VK_NULL_HANDLE;
 		}
 	}
 }
 
 void DrawEngineVulkan::ApplyDrawStateLate(VulkanRenderManager *renderManager, bool applyStencilRef, uint8_t stencilRef, bool useBlendConstant) {
 	if (gstate_c.IsDirty(DIRTY_VIEWPORTSCISSOR_STATE)) {
-		renderManager->SetScissor(dynState_.scissor);
+		renderManager->SetScissor(dynState_.scissor.x, dynState_.scissor.y, dynState_.scissor.width, dynState_.scissor.height);
 		renderManager->SetViewport(dynState_.viewport);
 	}
 	if ((gstate_c.IsDirty(DIRTY_DEPTHSTENCIL_STATE) && dynState_.useStencil) || applyStencilRef) {

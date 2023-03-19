@@ -74,20 +74,20 @@ void CalcCullRange(float minValues[4], float maxValues[4], bool flipViewport, bo
 
 void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipViewport, bool useBufferedRendering) {
 	if (dirtyUniforms & DIRTY_TEXENV) {
-		Uint8x3ToFloat4(ub->texEnvColor, gstate.texenvcolor);
+		Uint8x3ToFloat3(ub->texEnvColor, gstate.texenvcolor);
 	}
 	if (dirtyUniforms & DIRTY_ALPHACOLORREF) {
-		Uint8x3ToInt4_Alpha(ub->alphaColorRef, gstate.getColorTestRef(), gstate.getAlphaTestRef() & gstate.getAlphaTestMask());
+		ub->alphaColorRef = gstate.getColorTestRef() | ((gstate.getAlphaTestRef() & gstate.getAlphaTestMask()) << 24);
 	}
 	if (dirtyUniforms & DIRTY_ALPHACOLORMASK) {
-		Uint8x3ToInt4_Alpha(ub->colorTestMask, gstate.getColorTestMask(), gstate.getAlphaTestMask());
+		ub->colorTestMask = gstate.getColorTestMask() | (gstate.getAlphaTestMask() << 24);
 	}
 	if (dirtyUniforms & DIRTY_FOGCOLOR) {
-		Uint8x3ToFloat4(ub->fogColor, gstate.fogcolor);
+		Uint8x3ToFloat3(ub->fogColor, gstate.fogcolor);
 	}
 	if (dirtyUniforms & DIRTY_SHADERBLEND) {
-		Uint8x3ToFloat4(ub->blendFixA, gstate.getFixA());
-		Uint8x3ToFloat4(ub->blendFixB, gstate.getFixB());
+		Uint8x3ToFloat3(ub->blendFixA, gstate.getFixA());
+		Uint8x3ToFloat3(ub->blendFixB, gstate.getFixB());
 	}
 	if (dirtyUniforms & DIRTY_TEXCLAMP) {
 		const float invW = 1.0f / (float)gstate_c.curTextureWidth;
@@ -104,6 +104,11 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 		ub->texClamp[3] = invH * 0.5f;
 		ub->texClampOffset[0] = gstate_c.curTextureXOffset * invW;
 		ub->texClampOffset[1] = gstate_c.curTextureYOffset * invH;
+	}
+
+	if (dirtyUniforms & DIRTY_MIPBIAS) {
+		float mipBias = (float)gstate.getTexLevelOffset16() * (1.0 / 16.0f);
+		ub->mipBias = (mipBias + 0.5f) / (float)(gstate.getTextureMaxLevel() + 1);
 	}
 
 	if (dirtyUniforms & DIRTY_PROJMATRIX) {
@@ -130,11 +135,12 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 			ConvertProjMatrixToVulkan(flippedMatrix);
 		}
 
-		if (!useBufferedRendering && g_display_rotation != DisplayRotation::ROTATE_0) {
-			flippedMatrix = flippedMatrix * g_display_rot_matrix;
+		if (!useBufferedRendering && g_display.rotation != DisplayRotation::ROTATE_0) {
+			flippedMatrix = flippedMatrix * g_display.rot_matrix;
 		}
 		CopyMatrix4x4(ub->proj, flippedMatrix.getReadPtr());
-		ub->rotation = useBufferedRendering ? 0 : (float)g_display_rotation;
+
+		ub->rotation = useBufferedRendering ? 0 : (float)g_display.rotation;
 	}
 
 	if (dirtyUniforms & DIRTY_PROJTHROUGHMATRIX) {
@@ -144,11 +150,17 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 		} else {
 			proj_through.setOrthoVulkan(0.0f, gstate_c.curRTWidth, 0, gstate_c.curRTHeight, 0, 1);
 		}
-		if (!useBufferedRendering && g_display_rotation != DisplayRotation::ROTATE_0) {
-			proj_through = proj_through * g_display_rot_matrix;
+		if (!useBufferedRendering && g_display.rotation != DisplayRotation::ROTATE_0) {
+			proj_through = proj_through * g_display.rot_matrix;
 		}
+
+		// Negative RT offsets come from split framebuffers (Killzone)
+		if (gstate_c.curRTOffsetX < 0 || gstate_c.curRTOffsetY < 0) {
+			proj_through.wx += 2.0f * (float)gstate_c.curRTOffsetX / (float)gstate_c.curRTWidth;
+			proj_through.wy += 2.0f * (float)gstate_c.curRTOffsetY / (float)gstate_c.curRTHeight;
+		}
+
 		CopyMatrix4x4(ub->proj_through, proj_through.getReadPtr());
-		ub->rotation = useBufferedRendering ? 0 : (float)g_display_rotation;
 	}
 
 	// Transform
@@ -162,25 +174,41 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 		ConvertMatrix4x3To3x4Transposed(ub->tex, gstate.tgenMatrix);
 	}
 
-	if (dirtyUniforms & DIRTY_FOGCOEF) {
-		float fogcoef[2] = {
-			getFloat24(gstate.fog1),
-			getFloat24(gstate.fog2),
-		};
-		// The PSP just ignores infnan here (ignoring IEEE), so take it down to a valid float.
-		// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
-		if (my_isnanorinf(fogcoef[0])) {
-			// Not really sure what a sensible value might be, but let's try 64k.
-			fogcoef[0] = std::signbit(fogcoef[0]) ? -65535.0f : 65535.0f;
+	if (dirtyUniforms & DIRTY_FOGCOEFENABLE) {
+		if (gstate.isFogEnabled() && !gstate.isModeThrough()) {
+			float fogcoef[2] = {
+				getFloat24(gstate.fog1),
+				getFloat24(gstate.fog2),
+			};
+			// The PSP just ignores infnan here (ignoring IEEE), so take it down to a valid float.
+			// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
+			if (my_isnanorinf(fogcoef[0])) {
+				// Not really sure what a sensible value might be, but let's try 64k.
+				fogcoef[0] = std::signbit(fogcoef[0]) ? -65535.0f : 65535.0f;
+			}
+			if (my_isnanorinf(fogcoef[1])) {
+				fogcoef[1] = std::signbit(fogcoef[1]) ? -65535.0f : 65535.0f;
+			}
+			CopyFloat2(ub->fogCoef, fogcoef);
+		} else {
+			// not very useful values, use as marker for disabled fog.
+			// could also burn one extra uniform.
+			ub->fogCoef[0] = -65536.0f;
+			ub->fogCoef[1] = -65536.0f;
 		}
-		if (my_isnanorinf(fogcoef[1])) {
-			fogcoef[1] = std::signbit(fogcoef[1]) ? -65535.0f : 65535.0f;
+	}
+
+	if (dirtyUniforms & DIRTY_TEX_ALPHA_MUL) {
+		bool doTextureAlpha = gstate.isTextureAlphaUsed();
+		if (gstate_c.textureFullAlpha && gstate.getTextureFunction() != GE_TEXFUNC_REPLACE) {
+			doTextureAlpha = false;
 		}
-		CopyFloat2(ub->fogCoef, fogcoef);
+		ub->texNoAlpha = doTextureAlpha ? 0.0f : 1.0f;
+		ub->texMul = gstate.isColorDoublingEnabled() ? 2.0f : 1.0f;
 	}
 
 	if (dirtyUniforms & DIRTY_STENCILREPLACEVALUE) {
-		ub->stencil = (float)gstate.getStencilTestRef() / 255.0;
+		ub->stencilReplaceValue = (float)gstate.getStencilTestRef() * (1.0 / 255.0);
 	}
 
 	// Note - this one is not in lighting but in transformCommon as it has uses beyond lighting
@@ -223,16 +251,16 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 		float vpZCenter = gstate.getViewportZCenter();
 
 		// These are just the reverse of the formulas in GPUStateUtils.
-		float halfActualZRange = vpZScale / gstate_c.vpDepthScale;
+		float halfActualZRange = gstate_c.vpDepthScale != 0.0f ? vpZScale / gstate_c.vpDepthScale : 0.0f;
+		float inverseDepthScale = gstate_c.vpDepthScale != 0.0f ? 1.0f / gstate_c.vpDepthScale : 0.0f;
 		float minz = -((gstate_c.vpZOffset * halfActualZRange) - vpZCenter) - halfActualZRange;
 		float viewZScale = halfActualZRange * 2.0f;
-		// Account for the half pixel offset.
-		float viewZCenter = minz + (DepthSliceFactor() / 256.0f) * 0.5f;
+		float viewZCenter = minz;
 
 		ub->depthRange[0] = viewZScale;
 		ub->depthRange[1] = viewZCenter;
 		ub->depthRange[2] = gstate_c.vpZOffset * 0.5f + 0.5f;
-		ub->depthRange[3] = 2.0f * (1.0f / gstate_c.vpDepthScale);
+		ub->depthRange[3] = 2.0f * inverseDepthScale;
 	}
 
 	if (dirtyUniforms & DIRTY_CULLRANGE) {
@@ -255,6 +283,33 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 	}
 }
 
+// For "light ubershader" bits.
+uint32_t PackLightControlBits() {
+	// Bit organization
+	// Bottom 4 bits are enable bits for each light.
+	// Then, for each light, comes 2 bits for "comp" and 2 bits for "type".
+	// At the end, at bit 20, we put the three material update bits.
+
+	uint32_t lightControl = 0;
+	for (int i = 0; i < 4; i++) {
+		if (gstate.isLightChanEnabled(i)) {
+			lightControl |= 1 << i;
+		}
+
+		u32 computation = (u32)gstate.getLightComputation(i);  // 2 bits
+		u32 type = (u32)gstate.getLightType(i);  // 2 bits
+		if (type == 3) { type = 0; }  // Don't want to handle this degenerate case in the shader.
+		lightControl |= computation << (4 + i * 4);
+		lightControl |= type << (4 + i * 4 + 2);
+	}
+
+	// Material update is 3 bits.
+	lightControl |= gstate.getMaterialUpdate() << 20;
+	// LMODE is 1 bit.
+	lightControl |= gstate.isUsingSecondaryColor() << 23;
+	return lightControl;
+}
+
 void LightUpdateUniforms(UB_VS_Lights *ub, uint64_t dirtyUniforms) {
 	// Lighting
 	if (dirtyUniforms & DIRTY_AMBIENT) {
@@ -267,26 +322,22 @@ void LightUpdateUniforms(UB_VS_Lights *ub, uint64_t dirtyUniforms) {
 		Uint8x3ToFloat4_Alpha(ub->materialSpecular, gstate.materialspecular, std::max(0.0f, getFloat24(gstate.materialspecularcoef)));
 	}
 	if (dirtyUniforms & DIRTY_MATEMISSIVE) {
-		Uint8x3ToFloat4(ub->materialEmissive, gstate.materialemissive);
+		// We're not touching the fourth f32 here, because we store an u32 of control bits in it.
+		Uint8x3ToFloat3(ub->materialEmissive, gstate.materialemissive);
+	}
+	if (dirtyUniforms & DIRTY_LIGHT_CONTROL) {
+		ub->lightControl = PackLightControlBits();
 	}
 	for (int i = 0; i < 4; i++) {
 		if (dirtyUniforms & (DIRTY_LIGHT0 << i)) {
 			if (gstate.isDirectionalLight(i)) {
 				// Prenormalize
-				float x = getFloat24(gstate.lpos[i * 3 + 0]);
-				float y = getFloat24(gstate.lpos[i * 3 + 1]);
-				float z = getFloat24(gstate.lpos[i * 3 + 2]);
-				float len = sqrtf(x*x + y*y + z*z);
-				if (len == 0.0f)
-					len = 1.0f;
-				else
-					len = 1.0f / len;
-				float vec[3] = { x * len, y * len, z * len };
-				CopyFloat3To4(ub->lpos[i], vec);
+				ExpandFloat24x3ToFloat4AndNormalize(ub->lpos[i], &gstate.lpos[i * 3]);
 			} else {
 				ExpandFloat24x3ToFloat4(ub->lpos[i], &gstate.lpos[i * 3]);
 			}
-			ExpandFloat24x3ToFloat4(ub->ldir[i], &gstate.ldir[i * 3]);
+			// ldir is only used for spotlights. Prenormalize it.
+			ExpandFloat24x3ToFloat4AndNormalize(ub->ldir[i], &gstate.ldir[i * 3]);
 			ExpandFloat24x3ToFloat4(ub->latt[i], &gstate.latt[i * 3]);
 			float lightAngle_spotCoef[2] = { getFloat24(gstate.lcutoff[i]), getFloat24(gstate.lconv[i]) };
 			CopyFloat2To4(ub->lightAngle_SpotCoef[i], lightAngle_spotCoef);

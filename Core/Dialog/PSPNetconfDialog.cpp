@@ -15,10 +15,9 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#if defined(_WIN32)
+#include <algorithm>
 #include "Common/CommonWindows.h"
-#endif
-#include <TimeUtil.h>
+#include "Common/TimeUtil.h"
 #include "Common/Data/Text/I18n.h"
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
@@ -74,18 +73,8 @@ int PSPNetconfDialog::Init(u32 paramAddr) {
 	ChangeStatusInit(NET_INIT_DELAY_US);
 
 	// Eat any keys pressed before the dialog inited.
+	InitCommon();
 	UpdateButtons();
-	okButtonImg = ImageID("I_CIRCLE");
-	cancelButtonImg = ImageID("I_CROSS");
-	okButtonFlag = CTRL_CIRCLE;
-	cancelButtonFlag = CTRL_CROSS;
-	if (request.common.buttonSwap == 1)
-	{
-		okButtonImg = ImageID("I_CROSS");
-		cancelButtonImg = ImageID("I_CIRCLE");
-		okButtonFlag = CTRL_CROSS;
-		cancelButtonFlag = CTRL_CIRCLE;
-	}
 
 	connResult = -1;
 	scanInfosAddr = 0;
@@ -195,21 +184,21 @@ void PSPNetconfDialog::DisplayMessage(std::string text1, std::string text2a, std
 
 	PPGeScissor(0, (int)(centerY - h2 - 2), 480, (int)(centerY + h2 + 2));
 	PPGeDrawTextWrapped(text1.c_str(), 240.0f, centerY - h2 - scrollPos_, WRAP_WIDTH, 0, messageStyle);
-	if (text2a != "") {
-		if (text2b != "")
+	if (!text2a.empty()) {
+		if (!text2b.empty())
 			PPGeDrawTextWrapped(text2a.c_str(), 240.0f - 5.0f, centerY - h2 - scrollPos_ + totalHeight1 + marginTop, WRAP_WIDTH, 0, messageStyleRight);
 		else
 			PPGeDrawTextWrapped(text2a.c_str(), 240.0f, centerY - h2 - scrollPos_ + totalHeight1 + marginTop, WRAP_WIDTH, 0, messageStyle);
 	}
-	if (text2b != "")
+	if (!text2b.empty())
 		PPGeDrawTextWrapped(text2b.c_str(), 240.0f + 5.0f, centerY - h2 - scrollPos_ + totalHeight1 + marginTop, WRAP_WIDTH, 0, messageStyleLeft);
-	if (text3a != "") {
-		if (text3b != "")
+	if (!text3a.empty()) {
+		if (!text3b.empty())
 			PPGeDrawTextWrapped(text3a.c_str(), 240.0f - 5.0f, centerY - h2 - scrollPos_ + totalHeight1 + totalHeight2 + marginTop, WRAP_WIDTH, 0, messageStyleRight);
 		else
 			PPGeDrawTextWrapped(text3a.c_str(), 240.0f, centerY - h2 - scrollPos_ + totalHeight1 + totalHeight2 + marginTop, WRAP_WIDTH, 0, messageStyle);
 	}
-	if (text3b != "")
+	if (!text3b.empty())
 		PPGeDrawTextWrapped(text3b.c_str(), 240.0f + 5.0f, centerY - h2 - scrollPos_ + totalHeight1 + totalHeight2 + marginTop, WRAP_WIDTH, 0, messageStyleLeft);
 	PPGeScissorReset();
 
@@ -248,6 +237,7 @@ int PSPNetconfDialog::Update(int animSpeed) {
 	}
 
 	UpdateButtons();
+	UpdateCommon();
 	auto di = GetI18NCategory("Dialog");
 	auto err = GetI18NCategory("Error");
 	u64 now = (u64)(time_now_d() * 1000000.0);
@@ -261,10 +251,10 @@ int PSPNetconfDialog::Update(int animSpeed) {
 
 		if (!hideNotice) {
 			const float WRAP_WIDTH = 254.0f;
-			const ImageID confirmBtnImage = g_Config.iButtonPreference == PSP_SYSTEMPARAM_BUTTON_CROSS ? ImageID("I_CROSS") : ImageID("I_CIRCLE");
-			const int confirmBtn = g_Config.iButtonPreference == PSP_SYSTEMPARAM_BUTTON_CROSS ? CTRL_CROSS : CTRL_CIRCLE;
-			const ImageID cancelBtnImage = g_Config.iButtonPreference == PSP_SYSTEMPARAM_BUTTON_CROSS ? ImageID("I_CIRCLE") : ImageID("I_CROSS");
-			const int cancelBtn = g_Config.iButtonPreference == PSP_SYSTEMPARAM_BUTTON_CROSS ? CTRL_CIRCLE : CTRL_CROSS;
+			const int confirmBtn = GetConfirmButton();
+			const int cancelBtn = GetCancelButton();
+			const ImageID confirmBtnImage = confirmBtn == CTRL_CROSS ? ImageID("I_CROSS") : ImageID("I_CIRCLE");
+			const ImageID cancelBtnImage = cancelBtn == CTRL_CIRCLE ? ImageID("I_CIRCLE") : ImageID("I_CROSS");
 
 			PPGeStyle textStyle = FadedStyle(PPGeAlign::BOX_CENTER, 0.5f);
 			PPGeStyle buttonStyle = FadedStyle(PPGeAlign::BOX_LEFT, 0.5f);

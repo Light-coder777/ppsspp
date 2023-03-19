@@ -29,6 +29,7 @@
 
 #include "ppsspp_config.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -40,6 +41,8 @@
 #include <jni.h>
 #endif
 
+#include "Common/Data/Collections/TinySet.h"
+#include "Common/Data/Convert/SmallDataConvert.h"
 #include "Common/Data/Text/Parsers.h"
 #include "Common/Data/Text/WrapText.h"
 #include "Common/Data/Encoding/Utf8.h"
@@ -59,6 +62,7 @@
 #include "Core/MemMap.h"
 #include "Core/MIPS/MIPSVFPUUtils.h"
 #include "GPU/Common/TextureDecoder.h"
+#include "GPU/Common/GPUStateUtils.h"
 
 #include "android/jni/AndroidContentURI.h"
 
@@ -308,10 +312,47 @@ bool TestParsers() {
 	return true;
 }
 
+bool TestTinySet() {
+	TinySet<int, 4> a;
+	EXPECT_EQ_INT((int)a.size(), 0);
+	a.push_back(1);
+	EXPECT_EQ_INT((int)a.size(), 1);
+	a.push_back(2);
+	EXPECT_EQ_INT((int)a.size(), 2);
+	TinySet<int, 4> b;
+	b.push_back(8);
+	b.push_back(9);
+	b.push_back(10);
+	EXPECT_EQ_INT((int)b.size(), 3);
+
+	a.append(b);
+	EXPECT_EQ_INT((int)a.size(), 5);
+	EXPECT_EQ_INT((int)b.size(), 3);
+
+	b.append(b);
+	EXPECT_EQ_INT((int)b.size(), 6);
+
+	EXPECT_EQ_INT(a[0], 1);
+	EXPECT_EQ_INT(a[1], 2);
+	EXPECT_EQ_INT(a[2], 8);
+	EXPECT_EQ_INT(a[3], 9);
+	EXPECT_EQ_INT(a[4], 10);
+	a.append(a);
+	EXPECT_EQ_INT(a.size(), 10);
+	EXPECT_EQ_INT(a[9], 10);
+
+	b.push_back(11);
+	EXPECT_EQ_INT((int)b.size(), 7);
+	b.push_back(12);
+	EXPECT_EQ_INT((int)b.size(), 8);
+	b.push_back(13);
+	EXPECT_EQ_INT(b.size(), 9);
+	return true;
+}
+
 bool TestVFPUSinCos() {
 	float sine, cosine;
 	InitVFPUSinCos();
-	EXPECT_FALSE(vfpu_sincos == nullptr);
 	vfpu_sincos(0.0f, sine, cosine);
 	EXPECT_EQ_FLOAT(sine, 0.0f);
 	EXPECT_EQ_FLOAT(cosine, 1.0f);
@@ -475,29 +516,27 @@ private:
 };
 
 bool TestQuickTexHash() {
-	SetupTextureDecoder();
-
 	static const int BUF_SIZE = 1024;
 	AlignedMem buf(BUF_SIZE, 16);
 
 	memset(buf, 0, BUF_SIZE);
-	EXPECT_EQ_HEX(DoQuickTexHash(buf, BUF_SIZE), 0xaa756edc);
+	EXPECT_EQ_HEX(StableQuickTexHash(buf, BUF_SIZE), 0xaa756edc);
 
 	memset(buf, 1, BUF_SIZE);
-	EXPECT_EQ_HEX(DoQuickTexHash(buf, BUF_SIZE), 0x66f81b1c);
+	EXPECT_EQ_HEX(StableQuickTexHash(buf, BUF_SIZE), 0x66f81b1c);
 
 	strncpy(buf, "hello", BUF_SIZE);
-	EXPECT_EQ_HEX(DoQuickTexHash(buf, BUF_SIZE), 0xf6028131);
+	EXPECT_EQ_HEX(StableQuickTexHash(buf, BUF_SIZE), 0xf6028131);
 
 	strncpy(buf, "goodbye", BUF_SIZE);
-	EXPECT_EQ_HEX(DoQuickTexHash(buf, BUF_SIZE), 0xef81b54f);
+	EXPECT_EQ_HEX(StableQuickTexHash(buf, BUF_SIZE), 0xef81b54f);
 
 	// Simple patterns.
 	for (int i = 0; i < BUF_SIZE; ++i) {
 		char *p = buf;
 		p[i] = i & 0xFF;
 	}
-	EXPECT_EQ_HEX(DoQuickTexHash(buf, BUF_SIZE), 0x0d64531c);
+	EXPECT_EQ_HEX(StableQuickTexHash(buf, BUF_SIZE), 0x0d64531c);
 
 	int j = 573;
 	for (int i = 0; i < BUF_SIZE; ++i) {
@@ -505,7 +544,7 @@ bool TestQuickTexHash() {
 		j += ((i * 7) + (i & 3)) * 11;
 		p[i] = j & 0xFF;
 	}
-	EXPECT_EQ_HEX(DoQuickTexHash(buf, BUF_SIZE), 0x58de8dbc);
+	EXPECT_EQ_HEX(StableQuickTexHash(buf, BUF_SIZE), 0x58de8dbc);
 
 	return true;
 }
@@ -598,16 +637,22 @@ static bool TestPath() {
 	Path path3 = path2 / "foo/bar";
 	EXPECT_EQ_STR(path3.WithExtraExtension(".txt").ToString(), std::string("/asdf/jkl/foo/bar.txt"));
 
-	EXPECT_EQ_STR(Path("foo.bar/hello").GetFileExtension(), std::string(""));
+	EXPECT_EQ_STR(Path("foo.bar/hello").GetFileExtension(), std::string());
 	EXPECT_EQ_STR(Path("foo.bar/hello.txt").WithReplacedExtension(".txt", ".html").ToString(), std::string("foo.bar/hello.html"));
 
 	EXPECT_EQ_STR(Path("C:\\Yo").NavigateUp().ToString(), std::string("C:"));
+#if PPSSPP_PLATFORM(WINDOWS)
 	EXPECT_EQ_STR(Path("C:").NavigateUp().ToString(), std::string("/"));
 
 	EXPECT_EQ_STR(Path("C:\\Yo").GetDirectory(), std::string("C:"));
 	EXPECT_EQ_STR(Path("C:\\Yo").GetFilename(), std::string("Yo"));
 	EXPECT_EQ_STR(Path("C:\\Yo\\Lo").GetDirectory(), std::string("C:/Yo"));
 	EXPECT_EQ_STR(Path("C:\\Yo\\Lo").GetFilename(), std::string("Lo"));
+
+	EXPECT_EQ_STR(Path(R"(\\host\share\filename)").GetRootVolume().ToString(), std::string("//host"));
+	EXPECT_EQ_STR(Path(R"(\\?\UNC\share\filename)").GetRootVolume().ToString(), std::string("//?/UNC"));
+	EXPECT_EQ_STR(Path(R"(\\?\C:\share\filename)").GetRootVolume().ToString(), std::string("//?/C:"));
+#endif
 
 	std::string computedPath;
 
@@ -617,6 +662,9 @@ static bool TestPath() {
 
 	EXPECT_TRUE(Path("/").ComputePathTo(Path("/home/foo/bar"), computedPath));
 	EXPECT_EQ_STR(computedPath, std::string("home/foo/bar"));
+
+	EXPECT_TRUE(Path("/a/b").ComputePathTo(Path("/a/b"), computedPath));
+	EXPECT_EQ_STR(computedPath, std::string());
 
 	return true;
 }
@@ -671,7 +719,7 @@ protected:
 	float MeasureWidth(const char *str, size_t bytes) override {
 		// Simple case for unit testing.
 		int w = 0;
-		for (UTF8 utf(str); !utf.end() && utf.byteIndex() < bytes; ) {
+		for (UTF8 utf(str); !utf.end() && (size_t)utf.byteIndex() < bytes; ) {
 			uint32_t c = utf.next();
 			switch (c) {
 			case ' ':
@@ -740,6 +788,56 @@ static bool TestWrapText() {
 	return true;
 }
 
+static bool TestSmallDataConvert() {
+	float f[4] = { 1.0f / 255.0f, 2.0f / 255.0f, 3.0f / 255.0f, 4.0f / 255.f };
+	uint32_t result = Float4ToUint8x4_NoClamp(f);
+	EXPECT_EQ_HEX(result, 0x04030201);
+	result = Float4ToUint8x4(f);
+	EXPECT_EQ_HEX(result, 0x04030201);
+	return true;
+}
+
+float DepthSliceFactor(u32 useFlags);
+
+static bool TestDepthMath() {
+	// These are in normalized space.
+	static const volatile float testValues[] = { 0.0f, 0.1f, 0.5f, M_PI / 4.0f, 0.9f, 1.0f };
+
+	// Flag combinations that can happen (any combination not included here is invalid, see comment
+	// over in GPUStateUtils.cpp):
+	static const u32 useFlagsArray[] = {
+		0,
+		GPU_USE_ACCURATE_DEPTH,
+		GPU_USE_ACCURATE_DEPTH | GPU_SCALE_DEPTH_FROM_24BIT_TO_16BIT,
+		GPU_USE_DEPTH_CLAMP | GPU_USE_ACCURATE_DEPTH,
+		GPU_USE_DEPTH_CLAMP | GPU_USE_ACCURATE_DEPTH | GPU_SCALE_DEPTH_FROM_24BIT_TO_16BIT,  // Here, GPU_SCALE_DEPTH_FROM_24BIT_TO_16BIT should take precedence over USE_DEPTH_CLAMP.
+	};
+	static const float expectedScale[] = { 65535.0f, 262140.0f, 16777215.0f, 65535.0f, 16777215.0f, };
+	static const float expectedOffset[] = { 0.0f, 0.375f, 0.498047f, 0.0f, 0.498047f, };
+
+	EXPECT_REL_EQ_FLOAT(100000.0f, 100001.0f, 0.00001f);
+
+	for (int j = 0; j < ARRAY_SIZE(useFlagsArray); j++) {
+		u32 useFlags = useFlagsArray[j];
+		printf("j: %d useflags: %d\n", j, useFlags);
+		DepthScaleFactors factors = GetDepthScaleFactors(useFlags);
+
+		EXPECT_EQ_FLOAT(factors.ScaleU16(), expectedScale[j]);
+		EXPECT_REL_EQ_FLOAT(factors.Offset(), expectedOffset[j], 0.00001f);
+		EXPECT_REL_EQ_FLOAT(factors.Scale(), DepthSliceFactor(useFlags), 0.0001f);
+
+		for (int i = 0; i < ARRAY_SIZE(testValues); i++) {
+			float testValue = testValues[i] * 65535.0f;
+
+			float encoded = factors.EncodeFromU16(testValue);
+			float decodedU16 = factors.DecodeToU16(encoded);
+			EXPECT_REL_EQ_FLOAT(decodedU16, testValue, 0.0001f);
+		}
+	}
+
+	return true;
+}
+
 typedef bool (*TestFunc)();
 struct TestItem {
 	const char *name;
@@ -751,7 +849,10 @@ struct TestItem {
 bool TestArmEmitter();
 bool TestArm64Emitter();
 bool TestX64Emitter();
+bool TestRiscVEmitter();
 bool TestShaderGenerators();
+bool TestSoftwareGPUJit();
+bool TestIRPassSimplify();
 bool TestThreadManager();
 
 TestItem availableTests[] = {
@@ -764,12 +865,16 @@ TestItem availableTests[] = {
 #if PPSSPP_ARCH(AMD64) || PPSSPP_ARCH(X86)
 	TEST_ITEM(X64Emitter),
 #endif
+#if PPSSPP_ARCH(AMD64) || PPSSPP_ARCH(X86) || PPSSPP_ARCH(RISCV64)
+	TEST_ITEM(RiscVEmitter),
+#endif
 	TEST_ITEM(VertexJit),
 	TEST_ITEM(Asin),
 	TEST_ITEM(SinCos),
 	TEST_ITEM(VFPUSinCos),
 	TEST_ITEM(MathUtil),
 	TEST_ITEM(Parsers),
+	TEST_ITEM(IRPassSimplify),
 	TEST_ITEM(Jit),
 	TEST_ITEM(MatrixTranspose),
 	TEST_ITEM(ParseLBN),
@@ -777,10 +882,14 @@ TestItem availableTests[] = {
 	TEST_ITEM(CLZ),
 	TEST_ITEM(MemMap),
 	TEST_ITEM(ShaderGenerators),
+	TEST_ITEM(SoftwareGPUJit),
 	TEST_ITEM(Path),
 	TEST_ITEM(AndroidContentURI),
 	TEST_ITEM(ThreadManager),
 	TEST_ITEM(WrapText),
+	TEST_ITEM(TinySet),
+	TEST_ITEM(SmallDataConvert),
+	TEST_ITEM(DepthMath),
 };
 
 int main(int argc, const char *argv[]) {

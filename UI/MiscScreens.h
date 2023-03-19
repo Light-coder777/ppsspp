@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "Common/UI/UIScreen.h"
+#include "Common/UI/PopupScreens.h"
 #include "Common/File/DirListing.h"
 #include "Common/File/Path.h"
 
@@ -51,6 +52,9 @@ public:
 	void sendMessage(const char *message, const char *value) override;
 protected:
 	Path gamePath_;
+
+	bool forceTransparent_ = false;
+	bool darkenGameBackground_ = true;
 };
 
 class UIDialogScreenWithBackground : public UIDialogScreen {
@@ -71,16 +75,21 @@ public:
 	void sendMessage(const char *message, const char *value) override;
 protected:
 	Path gamePath_;
+
+	bool forceTransparent_ = false;
+	bool darkenGameBackground_ = true;
 };
 
-class PromptScreen : public UIDialogScreenWithBackground {
+class PromptScreen : public UIDialogScreenWithGameBackground {
 public:
-	PromptScreen(std::string message, std::string yesButtonText, std::string noButtonText,
+	PromptScreen(const Path& gamePath, std::string message, std::string yesButtonText, std::string noButtonText,
 		std::function<void(bool)> callback = &NoOpVoidBool);
 
 	void CreateViews() override;
 
 	void TriggerFinish(DialogResult result) override;
+
+	const char *tag() const override { return "Prompt"; }
 
 private:
 	UI::EventReturn OnYes(UI::EventParams &e);
@@ -92,36 +101,25 @@ private:
 	std::function<void(bool)> callback_;
 };
 
-class NewLanguageScreen : public ListPopupScreen {
+class NewLanguageScreen : public UI::ListPopupScreen {
 public:
 	NewLanguageScreen(const std::string &title);
 
+	const char *tag() const override { return "NewLanguage"; }
+
 private:
 	void OnCompleted(DialogResult result) override;
 	bool ShowButtons() const override { return true; }
-	std::map<std::string, std::pair<std::string, int>> langValuesMapping;
-	std::map<std::string, std::string> titleCodeMapping;
 	std::vector<File::FileInfo> langs_;
 };
 
-class PostProcScreen : public ListPopupScreen {
-public:
-	PostProcScreen(const std::string &title, int id);
-
-	void CreateViews() override;
-
-private:
-	void OnCompleted(DialogResult result) override;
-	bool ShowButtons() const override { return true; }
-	std::vector<ShaderInfo> shaders_;
-	int id_;
-};
-
-class TextureShaderScreen : public ListPopupScreen {
+class TextureShaderScreen : public UI::ListPopupScreen {
 public:
 	TextureShaderScreen(const std::string &title);
 
 	void CreateViews() override;
+
+	const char *tag() const override { return "TextureShader"; }
 
 private:
 	void OnCompleted(DialogResult result) override;
@@ -140,11 +138,13 @@ public:
 	LogoScreen(AfterLogoScreen afterLogoScreen = AfterLogoScreen::DEFAULT);
 
 	bool key(const KeyInput &key) override;
-	bool touch(const TouchInput &touch) override;
+	void touch(const TouchInput &touch) override;
 	void update() override;
 	void render() override;
 	void sendMessage(const char *message, const char *value) override;
 	void CreateViews() override {}
+
+	const char *tag() const override { return "Logo"; }
 
 private:
 	void Next();
@@ -162,9 +162,9 @@ public:
 
 	void CreateViews() override;
 
-private:
-	UI::EventReturn OnOK(UI::EventParams &e);
+	const char *tag() const override { return "Credits"; }
 
+private:
 	UI::EventReturn OnSupport(UI::EventParams &e);
 	UI::EventReturn OnPPSSPPOrg(UI::EventParams &e);
 	UI::EventReturn OnPrivacy(UI::EventParams &e);
@@ -183,9 +183,9 @@ public:
 	void SetBottomCutoff(float y) {
 		cutOffY_ = y;
 	}
-	void Show(const std::string &text, UI::View *refView = nullptr);
+	void Show(const std::string &text, const UI::View *refView = nullptr);
 
-	void Draw(UIContext &dc);
+	void Draw(UIContext &dc) override;
 	std::string GetText() const;
 
 private:
@@ -194,3 +194,5 @@ private:
 	float cutOffY_;
 	bool showing_ = false;
 };
+
+uint32_t GetBackgroundColorWithAlpha(const UIContext &dc);

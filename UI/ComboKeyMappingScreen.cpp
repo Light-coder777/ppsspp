@@ -24,7 +24,6 @@
 
 #include "Common/Data/Text/I18n.h"
 #include "Common/Data/Color/RGBAUtil.h"
-#include "Common/File/PathBrowser.h"
 #include "Common/Math/curves.h"
 #include "Common/TimeUtil.h"
 #include "Common/StringUtils.h"
@@ -56,6 +55,8 @@ public:
 		parent->Add(scroll);
 	}
 
+	const char *tag() const override { return "ButtonShape"; }
+
 private:
 	int *setting_;
 };
@@ -83,6 +84,8 @@ public:
 		scroll->Add(items);
 		parent->Add(scroll);
 	}
+
+	const char *tag() const override { return "ButtonIcon"; }
 
 private:
 	int *setting_;
@@ -212,7 +215,7 @@ void ComboKeyScreen::CreateViews() {
 	vertLayout->Add(new CheckBox(show, co->T("Visible")));
 
 	Choice *icon = vertLayout->Add(new Choice(co->T("Icon")));
-	icon->SetIcon(ImageID(comboKeyImages[cfg->image].i), 1.0f, comboKeyImages[cfg->image].r*PI/180); // Set right icon on the choice
+	icon->SetIcon(ImageID(comboKeyImages[cfg->image].i), 1.0f, comboKeyImages[cfg->image].r*PI/180, false, false); // Set right icon on the choice
 	icon->OnClick.Add([=](UI::EventParams &e) {
 		auto iconScreen = new ButtonIconScreen(co->T("Icon"), &(cfg->image));
 		if (e.v)
@@ -223,7 +226,7 @@ void ComboKeyScreen::CreateViews() {
 	});
 
 	Choice *shape = vertLayout->Add(new Choice(co->T("Shape")));
-	shape->SetIcon(ImageID(comboKeyShapes[cfg->shape].l), 0.6f, comboKeyShapes[cfg->shape].r*PI/180, comboKeyShapes[cfg->shape].f); // Set right icon on the choice
+	shape->SetIcon(ImageID(comboKeyShapes[cfg->shape].l), 0.6f, comboKeyShapes[cfg->shape].r*PI/180, comboKeyShapes[cfg->shape].f, false); // Set right icon on the choice
 	shape->OnClick.Add([=](UI::EventParams &e) {
 		auto shape = new ButtonShapeScreen(co->T("Shape"), &(cfg->shape));
 		if (e.v)
@@ -235,6 +238,7 @@ void ComboKeyScreen::CreateViews() {
 
 	vertLayout->Add(new ItemHeader(co->T("Button Binding")));
 	vertLayout->Add(new CheckBox(&(cfg->toggle), co->T("Toggle mode")));
+	vertLayout->Add(new CheckBox(&(cfg->repeat), co->T("Repeat mode")));
 
 	const int cellSize = 400;
 	UI::GridLayoutSettings gridsettings(cellSize, 64, 5);
@@ -266,7 +270,7 @@ void ComboKeyScreen::CreateViews() {
 	}
 }
 
-static uint64_t arrayToInt(bool ary[ARRAY_SIZE(CustomKey::comboKeyList)]) {
+static uint64_t arrayToInt(const bool ary[ARRAY_SIZE(CustomKey::comboKeyList)]) {
 	uint64_t value = 0;
 	for (int i = ARRAY_SIZE(CustomKey::comboKeyList)-1; i >= 0; i--) {
 		value |= ary[i] ? 1 : 0;

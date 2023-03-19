@@ -19,7 +19,9 @@
 #include <cstddef>
 #include <algorithm>
 
-#include "Common.h"
+#include "ext/xxhash.h"
+#include "Common/CommonTypes.h"
+#include "Common/Profiler/Profiler.h"
 
 #ifdef _WIN32
 #include "Common/CommonWindows.h"
@@ -58,6 +60,20 @@ op_agent_t agent;
 #endif
 
 const u32 INVALID_EXIT = 0xFFFFFFFF;
+
+static uint64_t HashJitBlock(const JitBlock &b) {
+	PROFILE_THIS_SCOPE("jithash");
+	if (JIT_USE_COMPILEDHASH) {
+		// Includes the emuhack (or emuhacks) in memory.
+		if (Memory::IsValidRange(b.originalAddress, b.originalSize * 4)) {
+			return XXH3_64bits(Memory::GetPointerUnchecked(b.originalAddress), b.originalSize * 4);
+		} else {
+			// Hm, this would be bad.
+			return 0;
+		}
+	}
+	return 0;
+}
 
 JitBlockCache::JitBlockCache(MIPSState *mipsState, CodeBlockCommon *codeBlock) :
 	codeBlock_(codeBlock), blocks_(nullptr), num_blocks_(0) {
@@ -187,7 +203,7 @@ void JitBlockCache::ProxyBlock(u32 rootAddress, u32 startAddress, u32 size, cons
 	// Make binary searches and stuff work ok
 	b.normalEntry = codePtr;
 	b.checkedEntry = codePtr;
-	proxyBlockMap_.insert(std::make_pair(startAddress, num_blocks_));
+	proxyBlockMap_.emplace(startAddress, num_blocks_);
 	AddBlockMap(num_blocks_);
 
 	num_blocks_++; //commit the current block
@@ -234,12 +250,15 @@ void JitBlockCache::FinalizeBlock(int block_num, bool block_link) {
 	MIPSOpcode opcode = GetEmuHackOpForBlock(block_num);
 	Memory::Write_Opcode_JIT(b.originalAddress, opcode);
 
+	// Note that this hashes the emuhack too, which is intentional.
+	b.compiledHash = HashJitBlock(b);
+
 	AddBlockMap(block_num);
 
 	if (block_link) {
 		for (int i = 0; i < MAX_JIT_BLOCK_EXITS; i++) {
 			if (b.exitAddress[i] != INVALID_EXIT) {
-				links_to_.insert(std::make_pair(b.exitAddress[i], block_num));
+				links_to_.emplace(b.exitAddress[i], block_num);
 			}
 		}
 
@@ -290,7 +309,7 @@ bool JitBlockCache::RangeMayHaveEmuHacks(u32 start, u32 end) const {
 	return false;
 }
 
-static int binary_search(JitBlock blocks_[], const u8 *baseoff, int imin, int imax) {
+static int binary_search(const JitBlock blocks_[], const u8 *baseoff, int imin, int imax) {
 	while (imin < imax) {
 		int imid = (imin + imax) / 2;
 		if (blocks_[imid].normalEntry < baseoff)
@@ -359,6 +378,15 @@ void JitBlockCache::GetBlockNumbersFromAddress(u32 em_address, std::vector<int> 
 	for (int i = 0; i < num_blocks_; i++)
 		if (blocks_[i].ContainsAddress(em_address))
 			block_numbers->push_back(i);
+}
+
+int JitBlockCache::GetBlockNumberFromAddress(u32 em_address) {
+	for (int i = 0; i < num_blocks_; i++) {
+		if (blocks_[i].ContainsAddress(em_address))
+			return i;
+	}
+
+	return -1;
 }
 
 u32 JitBlockCache::GetAddressFromBlockPtr(const u8 *ptr) const {
@@ -592,8 +620,15 @@ void JitBlockCache::InvalidateChangedBlocks() {
 		if (b.invalid || b.IsPureProxy())
 			continue;
 
-		const u32 emuhack = GetEmuHackOpForBlock(block_num).encoding;
-		if (Memory::ReadUnchecked_U32(b.originalAddress) != emuhack) {
+		bool changed = false;
+		if (JIT_USE_COMPILEDHASH) {
+			changed = b.compiledHash != HashJitBlock(b);
+		} else {
+			const u32 emuhack = GetEmuHackOpForBlock(block_num).encoding;
+			changed = Memory::ReadUnchecked_U32(b.originalAddress) != emuhack;
+		}
+
+		if (changed) {
 			DEBUG_LOG(JIT, "Invalidating changed block at %08x", b.originalAddress);
 			DestroyBlock(block_num, DestroyType::INVALIDATE);
 		}
@@ -607,6 +642,9 @@ int JitBlockCache::GetBlockExitSize() {
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
 	return 15;
 #elif PPSSPP_ARCH(ARM64)
+	// Will depend on the sequence found to encode the destination address.
+	return 0;
+#elif PPSSPP_ARCH(RISCV64)
 	// Will depend on the sequence found to encode the destination address.
 	return 0;
 #else
@@ -635,12 +673,12 @@ void JitBlockCache::ComputeStats(BlockCacheStats &bcStats) const {
 			bcStats.maxBloatBlock = b->originalAddress;
 		}
 		totalBloat += bloat;
-		bcStats.bloatMap[bloat] = b->originalAddress;
+		bcStats.bloatMap[(float)bloat] = b->originalAddress;
 	}
 	bcStats.numBlocks = num_blocks_;
-	bcStats.minBloat = minBloat;
-	bcStats.maxBloat = maxBloat;
-	bcStats.avgBloat = totalBloat / (double)num_blocks_;
+	bcStats.minBloat = (float)minBloat;
+	bcStats.maxBloat = (float)maxBloat;
+	bcStats.avgBloat = (float)(totalBloat / (double)num_blocks_);
 }
 
 JitBlockDebugInfo JitBlockCache::GetBlockDebugInfo(int blockNum) const {
@@ -660,6 +698,8 @@ JitBlockDebugInfo JitBlockCache::GetBlockDebugInfo(int blockNum) const {
 	debugInfo.targetDisasm = DisassembleArm64(block->normalEntry, block->codeSize);
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
 	debugInfo.targetDisasm = DisassembleX86(block->normalEntry, block->codeSize);
+#elif PPSSPP_ARCH(RISCV64)
+	debugInfo.targetDisasm = DisassembleRV64(block->normalEntry, block->codeSize);
 #endif
 
 	return debugInfo;

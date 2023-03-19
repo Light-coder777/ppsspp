@@ -34,13 +34,15 @@
 #include "Common/System/Display.h"
 #include "Common/System/NativeApp.h"
 #include "Common/System/System.h"
+#include "Common/File/FileUtil.h"
 #include "Common/File/VFS/VFS.h"
-#include "Common/File/VFS/AssetReader.h"
+#include "Common/File/VFS/DirectoryReader.h"
 #include "Common/Data/Text/I18n.h"
 #include "Common/Profiler/Profiler.h"
 #include "Common/Thread/ThreadUtil.h"
 #include "Common/Data/Encoding/Utf8.h"
 #include "Common/Net/Resolve.h"
+#include "W32Util/DarkMode.h"
 
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
@@ -109,9 +111,12 @@ static std::thread inputBoxThread;
 static bool inputBoxRunning = false;
 
 void OpenDirectory(const char *path) {
-	SFGAOF flags;
+	// SHParseDisplayName can't handle relative paths, so normalize first.
+	std::string resolved = ReplaceAll(File::ResolvePath(path), "/", "\\");
+
+	SFGAOF flags{};
 	PIDLIST_ABSOLUTE pidl = nullptr;
-	HRESULT hr = SHParseDisplayName(ConvertUTF8ToWString(ReplaceAll(path, "/", "\\")).c_str(), nullptr, &pidl, 0, &flags);
+	HRESULT hr = SHParseDisplayName(ConvertUTF8ToWString(resolved).c_str(), nullptr, &pidl, 0, &flags);
 
 	if (pidl) {
 		if (SUCCEEDED(hr))
@@ -126,6 +131,11 @@ void LaunchBrowser(const char *url) {
 
 void Vibrate(int length_ms) {
 	// Ignore on PC
+}
+
+static void AddDebugRestartArgs() {
+	if (LogManager::GetInstance()->GetConsoleListener()->IsOpen())
+		restartArgs += " -l";
 }
 
 // Adapted mostly as-is from http://www.gamedev.net/topic/495075-how-to-retrieve-info-about-videocard/?view=findpost&p=4229170
@@ -165,8 +175,8 @@ std::string GetVideoCardDriverVersion() {
 	IEnumWbemClassObject* pEnum;
 	hr = pIWbemServices->ExecQuery(bstrWQL, bstrPath, WBEM_FLAG_FORWARD_ONLY, NULL, &pEnum);
 
-	ULONG uReturned;
-	VARIANT var;
+	ULONG uReturned = 0;
+	VARIANT var{};
 	IWbemClassObject* pObj = NULL;
 	if (!FAILED(hr)) {
 		hr = pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturned);
@@ -207,7 +217,7 @@ std::string System_GetProperty(SystemProperty prop) {
 				if (wstr)
 					retval = ConvertWStringToUTF8(wstr);
 				else
-					retval = "";
+					retval.clear();
 				GlobalUnlock(handle);
 				CloseClipboard();
 			}
@@ -271,6 +281,23 @@ static int ScreenDPI() {
 #endif
 #endif
 
+static int ScreenRefreshRateHz() {
+	DEVMODE lpDevMode;
+	memset(&lpDevMode, 0, sizeof(DEVMODE));
+	lpDevMode.dmSize = sizeof(DEVMODE);
+	lpDevMode.dmDriverExtra = 0;
+
+	if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &lpDevMode) == 0) {
+		return 60;  // default value
+	} else {
+		if (lpDevMode.dmFields & DM_DISPLAYFREQUENCY) {
+			return lpDevMode.dmDisplayFrequency > 60 ? lpDevMode.dmDisplayFrequency : 60;
+		} else {
+			return 60;
+		}
+	}
+}
+
 int System_GetPropertyInt(SystemProperty prop) {
 	switch (prop) {
 	case SYSPROP_AUDIO_SAMPLE_RATE:
@@ -279,6 +306,21 @@ int System_GetPropertyInt(SystemProperty prop) {
 		return DEVICE_TYPE_DESKTOP;
 	case SYSPROP_DISPLAY_COUNT:
 		return GetSystemMetrics(SM_CMONITORS);
+	case SYSPROP_KEYBOARD_LAYOUT:
+	{
+		HKL localeId = GetKeyboardLayout(0);
+		// TODO: Is this list complete enough?
+		switch ((int)(intptr_t)localeId & 0xFFFF) {
+		case 0x407:
+			return KEYBOARD_LAYOUT_QWERTZ;
+		case 0x040c:
+		case 0x080c:
+		case 0x1009:
+			return KEYBOARD_LAYOUT_AZERTY;
+		default:
+			return KEYBOARD_LAYOUT_QWERTY;
+		}
+	}
 	default:
 		return -1;
 	}
@@ -287,7 +329,7 @@ int System_GetPropertyInt(SystemProperty prop) {
 float System_GetPropertyFloat(SystemProperty prop) {
 	switch (prop) {
 	case SYSPROP_DISPLAY_REFRESH_RATE:
-		return 60.f;
+		return (float)ScreenRefreshRateHz();
 	case SYSPROP_DISPLAY_DPI:
 		return (float)ScreenDPI();
 	case SYSPROP_DISPLAY_SAFE_INSET_LEFT:
@@ -319,6 +361,8 @@ bool System_GetPropertyBool(SystemProperty prop) {
 		return true;
 	case SYSPROP_HAS_KEYBOARD:
 		return true;
+	case SYSPROP_SUPPORTS_OPEN_FILE_IN_EDITOR:
+		return true;  // FileUtil.cpp: OpenFileInEditor
 	default:
 		return false;
 	}
@@ -331,6 +375,8 @@ void System_SendMessage(const char *command, const char *parameter) {
 		}
 	} else if (!strcmp(command, "graphics_restart")) {
 		restartArgs = parameter == nullptr ? "" : parameter;
+		if (!restartArgs.empty())
+			AddDebugRestartArgs();
 		if (IsDebuggerPresent()) {
 			PostMessage(MainWindow::GetHWND(), MainWindow::WM_USER_RESTART_EMUTHREAD, 0, 0);
 		} else {
@@ -344,16 +390,8 @@ void System_SendMessage(const char *command, const char *parameter) {
 		std::wstring title = ConvertUTF8ToWString(err->T("GenericGraphicsError", "Graphics Error"));
 		MessageBox(MainWindow::GetHWND(), full_error.c_str(), title.c_str(), MB_OK);
 	} else if (!strcmp(command, "setclipboardtext")) {
-		if (OpenClipboard(MainWindow::GetDisplayHWND())) {
-			std::wstring data = ConvertUTF8ToWString(parameter);
-			HANDLE handle = GlobalAlloc(GMEM_MOVEABLE, (data.size() + 1) * sizeof(wchar_t));
-			wchar_t *wstr = (wchar_t *)GlobalLock(handle);
-			memcpy(wstr, data.c_str(), (data.size() + 1) * sizeof(wchar_t));
-			GlobalUnlock(wstr);
-			SetClipboardData(CF_UNICODETEXT, handle);
-			GlobalFree(handle);
-			CloseClipboard();
-		}
+		std::wstring data = ConvertUTF8ToWString(parameter);
+		W32Util::CopyTextToClipboard(MainWindow::GetDisplayHWND(), data);
 	} else if (!strcmp(command, "browse_file")) {
 		MainWindow::BrowseAndBoot("");
 	} else if (!strcmp(command, "browse_folder")) {
@@ -383,6 +421,8 @@ void EnableCrashingOnCrashes() {
 	const DWORD EXCEPTION_SWALLOWING = 0x1;
 
 	HMODULE kernel32 = LoadLibrary(L"kernel32.dll");
+	if (!kernel32)
+		return;
 	tGetPolicy pGetPolicy = (tGetPolicy)GetProcAddress(kernel32,
 		"GetProcessUserModeExceptionPolicy");
 	tSetPolicy pSetPolicy = (tSetPolicy)GetProcAddress(kernel32,
@@ -411,6 +451,12 @@ void System_InputBoxGetString(const std::string &title, const std::string &defau
 			NativeInputBoxReceived(cb, false, "");
 		}
 	});
+}
+
+void System_Toast(const char *text) {
+	// Not-very-good implementation. Will normally not be used on Windows anyway.
+	std::wstring str = ConvertUTF8ToWString(text);
+	MessageBox(0, str.c_str(), L"Toast!", MB_ICONINFORMATION);
 }
 
 static std::string GetDefaultLangRegion() {
@@ -508,6 +554,8 @@ static void WinMainInit() {
 	// FMA3 support in the 2013 CRT is broken on Vista and Windows 7 RTM (fixed in SP1). Just disable it.
 	_set_FMA3_enable(0);
 #endif
+
+	InitDarkMode();
 }
 
 static void WinMainCleanup() {
@@ -535,8 +583,8 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 #endif
 
 	const Path &exePath = File::GetExeDirectory();
-	VFSRegister("", new DirectoryAssetReader(exePath / "assets"));
-	VFSRegister("", new DirectoryAssetReader(exePath));
+	g_VFS.Register("", new DirectoryReader(exePath / "assets"));
+	g_VFS.Register("", new DirectoryReader(exePath));
 
 	langRegion = GetDefaultLangRegion();
 	osName = GetWindowsVersion() + " " + GetWindowsSystemArchitecture();
@@ -656,7 +704,7 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 
 	if (iCmdShow == SW_MAXIMIZE) {
 		// Consider this to mean --fullscreen.
-		g_Config.bFullScreen = true;
+		g_Config.iForceFullScreen = 1;
 	}
 
 	// Consider at least the following cases before changing this code:
@@ -670,7 +718,8 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 		LogManager::GetInstance()->SetAllLogLevels(LogTypes::LDEBUG);
 	}
 
-	timeBeginPeriod(1);  // TODO: Evaluate if this makes sense to keep.
+	// This still seems to improve performance noticeably.
+	timeBeginPeriod(1);
 
 	ContextMenuInit(_hInstance);
 	MainWindow::Init(_hInstance);
@@ -738,7 +787,7 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 			break;
 		}
 
-		if (!TranslateAccelerator(wnd, accel, &msg)) {
+		if (!wnd || !accel || !TranslateAccelerator(wnd, accel, &msg)) {
 			if (!DialogManager::IsDialogMessage(&msg)) {
 				//and finally translate and dispatch
 				TranslateMessage(&msg);
@@ -747,9 +796,7 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 		}
 	}
 
-	MainThread_Stop();
-
-	VFSShutdown();
+	g_VFS.Clear();
 
 	MainWindow::DestroyDebugWindows();
 	DialogManager::DestroyAll();

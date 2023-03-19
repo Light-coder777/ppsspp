@@ -25,6 +25,8 @@
 
 class PointerWrap;
 
+static constexpr uint32_t MEMINFO_MIN_SIZE = 0x100;
+
 enum class MemBlockFlags {
 	ALLOC = 0x0001,
 	SUB_ALLOC = 0x0002,
@@ -66,7 +68,7 @@ inline void NotifyMemInfo(MemBlockFlags flags, uint32_t start, uint32_t size, co
 std::vector<MemBlockInfo> FindMemInfo(uint32_t start, uint32_t size);
 std::vector<MemBlockInfo> FindMemInfoByFlag(MemBlockFlags flags, uint32_t start, uint32_t size);
 
-std::string GetMemWriteTagAt(uint32_t start, uint32_t size);
+size_t FormatMemWriteTagAt(char *buf, size_t sz, const char *prefix, uint32_t start, uint32_t size);
 
 void MemBlockInfoInit();
 void MemBlockInfoShutdown();
@@ -75,3 +77,11 @@ void MemBlockInfoDoState(PointerWrap &p);
 void MemBlockOverrideDetailed();
 void MemBlockReleaseDetailed();
 bool MemBlockInfoDetailed();
+
+static inline bool MemBlockInfoDetailed(uint32_t size) {
+	return size >= MEMINFO_MIN_SIZE || MemBlockInfoDetailed();
+}
+
+static inline bool MemBlockInfoDetailed(uint32_t size1, uint32_t size2) {
+	return size1 >= MEMINFO_MIN_SIZE || size2 >= MEMINFO_MIN_SIZE || MemBlockInfoDetailed();
+}

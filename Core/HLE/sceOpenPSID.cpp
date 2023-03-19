@@ -38,9 +38,10 @@ static int sceOpenPSIDGetOpenPSID(u32 OpenPSIDPtr)
 {
 	WARN_LOG(HLE, "UNTESTED %s(%08x)", __FUNCTION__, OpenPSIDPtr);
 
-	if (Memory::IsValidAddress(OpenPSIDPtr))
-	{
-		Memory::WriteStruct(OpenPSIDPtr, &dummyOpenPSID);
+	auto ptr = PSPPointer<SceOpenPSID>::Create(OpenPSIDPtr);
+	if (ptr.IsValid()) {
+		*ptr = dummyOpenPSID;
+		ptr.NotifyWrite("OpenPSIDGetOpenPSID");
 	}
 	return 0;
 }
@@ -49,9 +50,10 @@ static int sceOpenPSIDGetPSID(u32 OpenPSIDPtr,u32 unknown)
 {
 	WARN_LOG(HLE, "UNTESTED %s(%08x, %08x)", __FUNCTION__, OpenPSIDPtr, unknown);
 
-	if (Memory::IsValidAddress(OpenPSIDPtr))
-	{
-		Memory::WriteStruct(OpenPSIDPtr, &dummyOpenPSID);
+	auto ptr = PSPPointer<SceOpenPSID>::Create(OpenPSIDPtr);
+	if (ptr.IsValid()) {
+		*ptr = dummyOpenPSID;
+		ptr.NotifyWrite("OpenPSIDGetPSID");
 	}
 	return 0;
 }
@@ -76,11 +78,18 @@ static s32 sceDdrdb_F013F8BF(u32 pDataPtr, u32 pSigPtr) {
 	return 0;
 }
 
+// unkPtr might be a pointer to OpenPSID
+static s32 sceOpenPSID_B29330DE(u32 unkPtr) {
+	ERROR_LOG(HLE, "UNIMPL %s(%08x)", __FUNCTION__, unkPtr);
+
+	return 0;
+}
 
 
 const HLEFunction sceOpenPSID[] = 
 {
 	{0XC69BEBCE, &WrapI_U<sceOpenPSIDGetOpenPSID>,   "sceOpenPSIDGetOpenPSID", 'i', "x" },
+	{0xB29330DE, &WrapI_U<sceOpenPSID_B29330DE>,     "sceOpenPSID_B29330DE",   'i', "x" },
 };
 
 void Register_sceOpenPSID()

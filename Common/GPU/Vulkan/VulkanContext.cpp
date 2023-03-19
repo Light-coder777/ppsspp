@@ -5,13 +5,13 @@
 #include <cstring>
 #include <iostream>
 
+#include "Common/System/System.h"
 #include "Common/System/Display.h"
 #include "Common/Log.h"
+#include "Common/GPU/Shader.h"
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "Common/GPU/Vulkan/VulkanDebug.h"
-#include "GPU/Common/ShaderCommon.h"
 #include "Common/StringUtils.h"
-#include "Core/Config.h"
 
 #ifdef USE_CRT_DBG
 #undef new
@@ -56,7 +56,7 @@ std::string VulkanVendorString(uint32_t vendorId) {
 	case VULKAN_VENDOR_ARM: return "ARM";
 	case VULKAN_VENDOR_QUALCOMM: return "Qualcomm";
 	case VULKAN_VENDOR_IMGTEC: return "Imagination";
-
+	case VULKAN_VENDOR_APPLE: return "Apple";
 	default:
 		return StringFromFormat("%08x", vendorId);
 	}
@@ -150,16 +150,28 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 	// Temporary hack for libretro. For some reason, when we try to load the functions from this extension,
 	// we get null pointers when running libretro. Quite strange.
 #if !defined(__LIBRETRO__)
-	if (IsInstanceExtensionAvailable(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
-		instance_extensions_enabled_.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+	if (EnableInstanceExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
 		extensionsLookup_.KHR_get_physical_device_properties2 = true;
 	}
 #endif
+
+	if (EnableInstanceExtension(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) {
+		extensionsLookup_.EXT_swapchain_colorspace = true;
+	}
 
 	// Validate that all the instance extensions we ask for are actually available.
 	for (auto ext : instance_extensions_enabled_) {
 		if (!IsInstanceExtensionAvailable(ext))
 			WARN_LOG(G3D, "WARNING: Does not seem that instance extension '%s' is available. Trying to proceed anyway.", ext);
+	}
+
+	// Check which Vulkan version we should request.
+	// Our code is fine with any version from 1.0 to 1.2, we don't know about higher versions.
+	u32 vulkanApiVersion = VK_API_VERSION_1_0;
+	if (vkEnumerateInstanceVersion) {
+		vkEnumerateInstanceVersion(&vulkanApiVersion);
+		vulkanApiVersion &= 0xFFFFF000;  // Remove patch version.
+		vulkanApiVersion = std::min(VK_API_VERSION_1_2, vulkanApiVersion);
 	}
 
 	VkApplicationInfo app_info{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
@@ -168,7 +180,7 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 	app_info.pEngineName = info.app_name;
 	// Let's increment this when we make major engine/context changes.
 	app_info.engineVersion = 2;
-	app_info.apiVersion = VK_API_VERSION_1_0;
+	app_info.apiVersion = vulkanApiVersion;
 
 	VkInstanceCreateInfo inst_info{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 	inst_info.flags = 0;
@@ -240,15 +252,21 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 			VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
 			VkPhysicalDevicePushDescriptorPropertiesKHR pushProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
 			VkPhysicalDeviceExternalMemoryHostPropertiesEXT extHostMemProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+			VkPhysicalDeviceDepthStencilResolveProperties depthStencilResolveProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES};
+
 			props2.pNext = &pushProps;
 			pushProps.pNext = &extHostMemProps;
+			extHostMemProps.pNext = &depthStencilResolveProps;
 			vkGetPhysicalDeviceProperties2KHR(physical_devices_[i], &props2);
 			// Don't want bad pointers sitting around.
 			props2.pNext = nullptr;
 			pushProps.pNext = nullptr;
+			extHostMemProps.pNext = nullptr;
+			depthStencilResolveProps.pNext = nullptr;
 			physicalDeviceProperties_[i].properties = props2.properties;
 			physicalDeviceProperties_[i].pushDescriptorProperties = pushProps;
 			physicalDeviceProperties_[i].externalMemoryHostProperties = extHostMemProps;
+			physicalDeviceProperties_[i].depthStencilResolve = depthStencilResolveProps;
 		}
 	} else {
 		for (uint32_t i = 0; i < gpu_count; i++) {
@@ -280,10 +298,14 @@ void VulkanContext::DestroyInstance() {
 	instance_ = VK_NULL_HANDLE;
 }
 
-void VulkanContext::BeginFrame() {
+void VulkanContext::BeginFrame(VkCommandBuffer firstCommandBuffer) {
 	FrameData *frame = &frame_[curFrame_];
 	// Process pending deletes.
-	frame->deleteList.PerformDeletes(device_, allocator_);
+	frame->deleteList.PerformDeletes(this, allocator_);
+	// VK_NULL_HANDLE when profiler is disabled.
+	if (firstCommandBuffer) {
+		frame->profiler.BeginFrame(this, firstCommandBuffer);
+	}
 }
 
 void VulkanContext::EndFrame() {
@@ -312,7 +334,7 @@ bool VulkanContext::MemoryTypeFromProperties(uint32_t typeBits, VkFlags requirem
 	for (uint32_t i = 0; i < 32; i++) {
 		if ((typeBits & 1) == 1) {
 			// Type is available, does it match user properties?
-			if ((memory_properties.memoryTypes[i].propertyFlags & requirements_mask) == requirements_mask) {
+			if ((memory_properties_.memoryTypes[i].propertyFlags & requirements_mask) == requirements_mask) {
 				*typeIndex = i;
 				return true;
 			}
@@ -513,7 +535,7 @@ int VulkanContext::GetBestPhysicalDevice() {
 
 void VulkanContext::ChooseDevice(int physical_device) {
 	physical_device_ = physical_device;
-	INFO_LOG(G3D, "Chose physical device %d: %p", physical_device, physical_devices_[physical_device]);
+	INFO_LOG(G3D, "Chose physical device %d: %s", physical_device, physicalDeviceProperties_[physical_device].properties.deviceName);
 
 	GetDeviceLayerProperties();
 	if (!CheckLayers(device_layer_properties_, device_layer_names_)) {
@@ -552,39 +574,48 @@ void VulkanContext::ChooseDevice(int physical_device) {
 	}
 
 	// This is as good a place as any to do this.
-	vkGetPhysicalDeviceMemoryProperties(physical_devices_[physical_device_], &memory_properties);
-	INFO_LOG(G3D, "Memory Types (%d):", memory_properties.memoryTypeCount);
-	for (int i = 0; i < (int)memory_properties.memoryTypeCount; i++) {
+	vkGetPhysicalDeviceMemoryProperties(physical_devices_[physical_device_], &memory_properties_);
+	INFO_LOG(G3D, "Memory Types (%d):", memory_properties_.memoryTypeCount);
+	for (int i = 0; i < (int)memory_properties_.memoryTypeCount; i++) {
 		// Don't bother printing dummy memory types.
-		if (!memory_properties.memoryTypes[i].propertyFlags)
+		if (!memory_properties_.memoryTypes[i].propertyFlags)
 			continue;
-		INFO_LOG(G3D, "  %d: Heap %d; Flags: %s%s%s%s  ", i, memory_properties.memoryTypes[i].heapIndex,
-			(memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? "DEVICE_LOCAL " : "",
-			(memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? "HOST_VISIBLE " : "",
-			(memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? "HOST_CACHED " : "",
-			(memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? "HOST_COHERENT " : "");
+		INFO_LOG(G3D, "  %d: Heap %d; Flags: %s%s%s%s  ", i, memory_properties_.memoryTypes[i].heapIndex,
+			(memory_properties_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? "DEVICE_LOCAL " : "",
+			(memory_properties_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? "HOST_VISIBLE " : "",
+			(memory_properties_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? "HOST_CACHED " : "",
+			(memory_properties_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? "HOST_COHERENT " : "");
 	}
 
 	// Optional features
 	if (extensionsLookup_.KHR_get_physical_device_properties2) {
 		VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2_KHR};
+		// Add to chain even if not supported, GetPhysicalDeviceFeatures is supposed to ignore unknown structs.
+		VkPhysicalDeviceMultiviewFeatures multiViewFeatures{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
+		features2.pNext = &multiViewFeatures;
 		vkGetPhysicalDeviceFeatures2KHR(physical_devices_[physical_device_], &features2);
-		deviceFeatures_.available = features2.features;
+		deviceFeatures_.available.standard = features2.features;
+		deviceFeatures_.available.multiview = multiViewFeatures;
 	} else {
-		vkGetPhysicalDeviceFeatures(physical_devices_[physical_device_], &deviceFeatures_.available);
+		vkGetPhysicalDeviceFeatures(physical_devices_[physical_device_], &deviceFeatures_.available.standard);
+		deviceFeatures_.available.multiview = {};
 	}
 
 	deviceFeatures_.enabled = {};
 	// Enable a few safe ones if they are available.
-	deviceFeatures_.enabled.dualSrcBlend = deviceFeatures_.available.dualSrcBlend;
-	deviceFeatures_.enabled.logicOp = deviceFeatures_.available.logicOp;
-	deviceFeatures_.enabled.depthClamp = deviceFeatures_.available.depthClamp;
-	deviceFeatures_.enabled.depthBounds = deviceFeatures_.available.depthBounds;
-	deviceFeatures_.enabled.samplerAnisotropy = deviceFeatures_.available.samplerAnisotropy;
-	deviceFeatures_.enabled.shaderClipDistance = deviceFeatures_.available.shaderClipDistance;
-	deviceFeatures_.enabled.shaderCullDistance = deviceFeatures_.available.shaderCullDistance;
-	// For easy wireframe mode, someday.
-	deviceFeatures_.enabled.fillModeNonSolid = deviceFeatures_.available.fillModeNonSolid;
+	deviceFeatures_.enabled.standard.dualSrcBlend = deviceFeatures_.available.standard.dualSrcBlend;
+	deviceFeatures_.enabled.standard.logicOp = deviceFeatures_.available.standard.logicOp;
+	deviceFeatures_.enabled.standard.depthClamp = deviceFeatures_.available.standard.depthClamp;
+	deviceFeatures_.enabled.standard.depthBounds = deviceFeatures_.available.standard.depthBounds;
+	deviceFeatures_.enabled.standard.samplerAnisotropy = deviceFeatures_.available.standard.samplerAnisotropy;
+	deviceFeatures_.enabled.standard.shaderClipDistance = deviceFeatures_.available.standard.shaderClipDistance;
+	deviceFeatures_.enabled.standard.shaderCullDistance = deviceFeatures_.available.standard.shaderCullDistance;
+	deviceFeatures_.enabled.standard.geometryShader = deviceFeatures_.available.standard.geometryShader;
+	deviceFeatures_.enabled.standard.sampleRateShading = deviceFeatures_.available.standard.sampleRateShading;
+
+	deviceFeatures_.enabled.multiview = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
+	deviceFeatures_.enabled.multiview.multiview = deviceFeatures_.available.multiview.multiview;
+	// deviceFeatures_.enabled.multiview.multiviewGeometryShader = deviceFeatures_.available.multiview.multiviewGeometryShader;
 
 	GetDeviceLayerExtensionList(nullptr, device_extension_properties_);
 
@@ -595,6 +626,16 @@ bool VulkanContext::EnableDeviceExtension(const char *extension) {
 	for (auto &iter : device_extension_properties_) {
 		if (!strcmp(iter.extensionName, extension)) {
 			device_extensions_enabled_.push_back(extension);
+			return true;
+		}
+	}
+	return false;
+}
+
+bool VulkanContext::EnableInstanceExtension(const char *extension) {
+	for (auto &iter : instance_extension_properties_) {
+		if (!strcmp(iter.extensionName, extension)) {
+			instance_extensions_enabled_.push_back(extension);
 			return true;
 		}
 	}
@@ -621,6 +662,7 @@ VkResult VulkanContext::CreateDevice() {
 	}
 	_dbg_assert_(found);
 
+	// TODO: A lot of these are on by default in later Vulkan versions, should check for that, technically.
 	extensionsLookup_.KHR_maintenance1 = EnableDeviceExtension(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
 	extensionsLookup_.KHR_maintenance2 = EnableDeviceExtension(VK_KHR_MAINTENANCE2_EXTENSION_NAME);
 	extensionsLookup_.KHR_maintenance3 = EnableDeviceExtension(VK_KHR_MAINTENANCE3_EXTENSION_NAME);
@@ -639,7 +681,12 @@ VkResult VulkanContext::CreateDevice() {
 		extensionsLookup_.KHR_create_renderpass2 = true;
 		extensionsLookup_.KHR_depth_stencil_resolve = EnableDeviceExtension(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME);
 	}
+
 	extensionsLookup_.EXT_shader_stencil_export = EnableDeviceExtension(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
+	extensionsLookup_.EXT_fragment_shader_interlock = EnableDeviceExtension(VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME);
+	extensionsLookup_.ARM_rasterization_order_attachment_access = EnableDeviceExtension(VK_ARM_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME);
+
+	VkPhysicalDeviceFeatures2 features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
 
 	VkDeviceCreateInfo device_info{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
 	device_info.queueCreateInfoCount = 1;
@@ -648,7 +695,14 @@ VkResult VulkanContext::CreateDevice() {
 	device_info.ppEnabledLayerNames = device_info.enabledLayerCount ? device_layer_names_.data() : nullptr;
 	device_info.enabledExtensionCount = (uint32_t)device_extensions_enabled_.size();
 	device_info.ppEnabledExtensionNames = device_info.enabledExtensionCount ? device_extensions_enabled_.data() : nullptr;
-	device_info.pEnabledFeatures = &deviceFeatures_.enabled;
+
+	if (extensionsLookup_.KHR_get_physical_device_properties2) {
+		device_info.pNext = &features2;
+		features2.features = deviceFeatures_.enabled.standard;
+		features2.pNext = &deviceFeatures_.enabled.multiview;
+	} else {
+		device_info.pEnabledFeatures = &deviceFeatures_.enabled.standard;
+	}
 
 	VkResult res = vkCreateDevice(physical_devices_[physical_device_], &device_info, nullptr, &device_);
 	if (res != VK_SUCCESS) {
@@ -657,7 +711,9 @@ VkResult VulkanContext::CreateDevice() {
 	} else {
 		VulkanLoadDeviceFunctions(device_, extensionsLookup_);
 	}
-	INFO_LOG(G3D, "Device created.\n");
+	INFO_LOG(G3D, "Vulkan Device created: %s", physicalDeviceProperties_[physical_device_].properties.deviceName);
+
+	// Since we successfully created a device (however we got here, might be interesting in debug), we force the choice to be visible in the menu.
 	VulkanSetAvailable(true);
 
 	VmaAllocatorCreateInfo allocatorInfo = {};
@@ -665,7 +721,49 @@ VkResult VulkanContext::CreateDevice() {
 	allocatorInfo.physicalDevice = physical_devices_[physical_device_];
 	allocatorInfo.device = device_;
 	allocatorInfo.instance = instance_;
-	vmaCreateAllocator(&allocatorInfo, &allocator_);
+	VkResult result = vmaCreateAllocator(&allocatorInfo, &allocator_);
+	_assert_(result == VK_SUCCESS);
+	_assert_(allocator_ != VK_NULL_HANDLE);
+
+	// Examine the physical device to figure out super rough performance grade.
+	// Basically all we want to do is to identify low performance mobile devices
+	// so we can make decisions on things like texture scaling strategy.
+	auto &props = physicalDeviceProperties_[physical_device_].properties;
+	switch (props.vendorID) {
+	case VULKAN_VENDOR_AMD:
+	case VULKAN_VENDOR_NVIDIA:
+	case VULKAN_VENDOR_INTEL:
+		devicePerfClass_ = PerfClass::FAST;
+		break;
+
+	case VULKAN_VENDOR_ARM:
+		devicePerfClass_ = PerfClass::SLOW;
+		{
+			// Parse the device name as an ultra rough heuristic.
+			int maliG = 0;
+			if (sscanf(props.deviceName, "Mali-G%d", &maliG) == 1) {
+				if (maliG >= 72) {
+					devicePerfClass_ = PerfClass::FAST;
+				}
+			}
+		}
+		break;
+
+	case VULKAN_VENDOR_QUALCOMM:
+		devicePerfClass_ = PerfClass::SLOW;
+#if PPSSPP_PLATFORM(ANDROID)
+		if (System_GetPropertyInt(SYSPROP_SYSTEMVERSION) >= 30) {
+			devicePerfClass_ = PerfClass::FAST;
+		}
+#endif
+		break;
+
+	case VULKAN_VENDOR_IMGTEC:
+	default:
+		devicePerfClass_ = PerfClass::SLOW;
+		break;
+	}
+
 	return res;
 }
 
@@ -790,6 +888,187 @@ VkResult VulkanContext::ReinitSurface() {
 	case WINDOWSYSTEM_DISPLAY:
 	{
 		VkDisplaySurfaceCreateInfoKHR display{ VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR };
+#if !defined(__LIBRETRO__)
+		/*
+		And when not to use libretro need VkDisplaySurfaceCreateInfoKHR this extension,
+		then you need to use dlopen to read vulkan loader in VulkanLoader.cpp.
+		huangzihan China
+		*/
+
+		if(!vkGetPhysicalDeviceDisplayPropertiesKHR || 
+		   !vkGetPhysicalDeviceDisplayPlanePropertiesKHR || 
+		   !vkGetDisplayModePropertiesKHR || 
+		   !vkGetDisplayPlaneSupportedDisplaysKHR || 
+		   !vkGetDisplayPlaneCapabilitiesKHR ) {
+			_assert_msg_(false, "DISPLAY Vulkan cannot find any vulkan function symbols.");
+			return VK_ERROR_INITIALIZATION_FAILED;
+		}
+
+		//The following code is for reference:
+		// https://github.com/vanfanel/ppsspp
+		// When using the VK_KHR_display extension and not using LIBRETRO, a complete
+		// VkDisplaySurfaceCreateInfoKHR is needed.
+
+		uint32_t display_count;
+		uint32_t plane_count;
+
+		VkDisplayPropertiesKHR *display_props = NULL;
+		VkDisplayPlanePropertiesKHR *plane_props = NULL;
+		VkDisplayModePropertiesKHR* mode_props = NULL;
+
+		VkExtent2D image_size;
+		// This is the chosen physical_device, it has been chosen elsewhere.
+		VkPhysicalDevice phys_device = physical_devices_[physical_device_];
+		VkDisplayModeKHR display_mode = VK_NULL_HANDLE;
+		VkDisplayPlaneAlphaFlagBitsKHR alpha_mode = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
+		uint32_t plane = UINT32_MAX;
+
+		// For now, use the first available (connected) display.
+		int display_index = 0;
+
+		VkResult result;
+		bool ret = false;
+		bool mode_found = false;
+
+		int i, j;
+
+		// 1 physical device can have N displays connected.
+		// Vulkan only counts the connected displays.
+
+		// Get a list of displays on the physical device.
+		display_count = 0;
+		vkGetPhysicalDeviceDisplayPropertiesKHR(phys_device, &display_count, NULL);
+		if (display_count == 0) {
+			_assert_msg_(false, "DISPLAY Vulkan couldn't find any displays.");
+			return VK_ERROR_INITIALIZATION_FAILED;
+		}
+		display_props = new VkDisplayPropertiesKHR[display_count];
+		vkGetPhysicalDeviceDisplayPropertiesKHR(phys_device, &display_count, display_props);
+
+		// Get a list of display planes on the physical device.
+		plane_count = 0;
+		vkGetPhysicalDeviceDisplayPlanePropertiesKHR(phys_device, &plane_count, NULL);
+		if (plane_count == 0) {
+			_assert_msg_(false, "DISPLAY Vulkan couldn't find any planes on the physical device");
+			return VK_ERROR_INITIALIZATION_FAILED;
+
+		}
+		plane_props = new VkDisplayPlanePropertiesKHR[plane_count];
+		vkGetPhysicalDeviceDisplayPlanePropertiesKHR(phys_device, &plane_count, plane_props);
+
+		// Get the Vulkan display we are going to use.	
+		VkDisplayKHR myDisplay = display_props[display_index].display;
+
+		// Get the list of display modes of the display
+		uint32_t mode_count = 0;
+		vkGetDisplayModePropertiesKHR(phys_device, myDisplay, &mode_count, NULL);
+		if (mode_count == 0) {
+			_assert_msg_(false, "DISPLAY Vulkan couldn't find any video modes on the display");
+			return VK_ERROR_INITIALIZATION_FAILED;
+		}
+		mode_props = new VkDisplayModePropertiesKHR[mode_count];
+		vkGetDisplayModePropertiesKHR(phys_device, myDisplay, &mode_count, mode_props);
+
+		// See if there's an appropiate mode available on the display 
+		display_mode = VK_NULL_HANDLE;
+		for (i = 0; i < mode_count; ++i)
+		{
+			const VkDisplayModePropertiesKHR* mode = &mode_props[i];
+
+			if (mode->parameters.visibleRegion.width == pixel_xres &&
+			    mode->parameters.visibleRegion.height == pixel_yres)
+			{
+				display_mode = mode->displayMode;
+				mode_found = true;
+				break;
+			}
+		}
+
+		// Free the mode list now.
+		delete [] mode_props;
+
+		// If there are no useable modes found on the display, error out
+		if (display_mode == VK_NULL_HANDLE)
+		{
+			_assert_msg_(false, "DISPLAY Vulkan couldn't find any video modes on the display");
+			return VK_ERROR_INITIALIZATION_FAILED;
+		}
+
+		/* Iterate on the list of planes of the physical device
+		   to find a plane that matches these criteria:
+		   -It must be compatible with the chosen display + mode.
+		   -It isn't currently bound to another display.
+		   -It supports per-pixel alpha, if possible. */
+		for (i = 0; i < plane_count; i++) {
+			uint32_t supported_displays_count = 0;
+			VkDisplayKHR* supported_displays;
+			VkDisplayPlaneCapabilitiesKHR plane_caps;
+
+			/* See if the plane is compatible with the current display. */
+			vkGetDisplayPlaneSupportedDisplaysKHR(phys_device, i, &supported_displays_count, NULL);
+			if (supported_displays_count == 0) {
+				/* This plane doesn't support any displays. Continue to the next plane. */
+				continue;
+			}
+
+			/* Get the list of displays supported by this plane. */
+			supported_displays = new VkDisplayKHR[supported_displays_count];
+			vkGetDisplayPlaneSupportedDisplaysKHR(phys_device, i,
+			    &supported_displays_count, supported_displays);
+
+			/* The plane must be bound to the chosen display, or not in use.
+			   If none of these is true, iterate to another plane. */
+			if ( !( (plane_props[i].currentDisplay == myDisplay) ||
+			        (plane_props[i].currentDisplay == VK_NULL_HANDLE))) 
+				continue;
+
+			/* Iterate the list of displays supported by this plane
+			   in order to find out if the chosen display is among them. */
+			bool plane_supports_display = false;
+			for (j = 0; j < supported_displays_count; j++) {
+				if (supported_displays[j] == myDisplay) {
+					plane_supports_display = true;
+					break;
+				}
+			}
+
+			/* Free the list of displays supported by this plane. */
+			delete [] supported_displays;
+
+			/* If the display is not supported by this plane, iterate to the next plane. */
+			if (!plane_supports_display)
+				continue;
+
+			/* Want a plane that supports the alpha mode we have chosen. */
+			vkGetDisplayPlaneCapabilitiesKHR(phys_device, display_mode, i, &plane_caps);
+			if (plane_caps.supportedAlpha & alpha_mode) {
+				/* Yep, this plane is alright. */
+				plane = i;
+				break;
+			}
+		}
+
+		/* If we couldn't find an appropiate plane, error out. */
+		if (plane == UINT32_MAX) {
+			_assert_msg_(false, "DISPLAY Vulkan couldn't find an appropiate plane");
+			return VK_ERROR_INITIALIZATION_FAILED;
+		}
+	
+		// Finally, create the vulkan surface.
+		image_size.width = pixel_xres;
+		image_size.height = pixel_yres;
+
+		display.displayMode = display_mode;
+		display.imageExtent = image_size;
+		display.transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+		display.alphaMode = alpha_mode;
+		display.globalAlpha = 1.0f;
+		display.planeIndex = plane;
+		display.planeStackIndex = plane_props[plane].currentStackIndex;
+		display.pNext = nullptr;
+		delete [] display_props;
+		delete [] plane_props;
+#endif
 		display.flags = 0;
 		retval = vkCreateDisplayPlaneSurfaceKHR(instance_, &display, nullptr, &surface_);
 		break;
@@ -807,6 +1086,10 @@ VkResult VulkanContext::ReinitSurface() {
 
 	if (!ChooseQueue()) {
 		return VK_ERROR_INITIALIZATION_FAILED;
+	}
+
+	for (int i = 0; i < ARRAY_SIZE(frame_); i++) {
+		frame_[i].profiler.Init(this);
 	}
 
 	return VK_SUCCESS;
@@ -838,7 +1121,7 @@ bool VulkanContext::ChooseQueue() {
 	}
 	if (presentQueueNodeIndex == UINT32_MAX) {
 		// If didn't find a queue that supports both graphics and present, then
-		// find a separate present queue.
+		// find a separate present queue. NOTE: We don't actually currently support this arrangement!
 		for (uint32_t i = 0; i < queue_count; ++i) {
 			if (supportsPresent[i] == VK_TRUE) {
 				presentQueueNodeIndex = i;
@@ -864,8 +1147,8 @@ bool VulkanContext::ChooseQueue() {
 		return false;
 	}
 
-	std::vector<VkSurfaceFormatKHR> surfFormats(formatCount);
-	res = vkGetPhysicalDeviceSurfaceFormatsKHR(physical_devices_[physical_device_], surface_, &formatCount, surfFormats.data());
+	surfFormats_.resize(formatCount);
+	res = vkGetPhysicalDeviceSurfaceFormatsKHR(physical_devices_[physical_device_], surface_, &formatCount, surfFormats_.data());
 	_dbg_assert_(res == VK_SUCCESS);
 	if (res != VK_SUCCESS) {
 		return false;
@@ -873,24 +1156,23 @@ bool VulkanContext::ChooseQueue() {
 	// If the format list includes just one entry of VK_FORMAT_UNDEFINED,
 	// the surface has no preferred format.  Otherwise, at least one
 	// supported format will be returned.
-	if (formatCount == 0 || (formatCount == 1 && surfFormats[0].format == VK_FORMAT_UNDEFINED)) {
+	if (formatCount == 0 || (formatCount == 1 && surfFormats_[0].format == VK_FORMAT_UNDEFINED)) {
 		INFO_LOG(G3D, "swapchain_format: Falling back to B8G8R8A8_UNORM");
 		swapchainFormat_ = VK_FORMAT_B8G8R8A8_UNORM;
 	} else {
 		swapchainFormat_ = VK_FORMAT_UNDEFINED;
 		for (uint32_t i = 0; i < formatCount; ++i) {
-			if (surfFormats[i].colorSpace != VK_COLORSPACE_SRGB_NONLINEAR_KHR) {
+			if (surfFormats_[i].colorSpace != VK_COLORSPACE_SRGB_NONLINEAR_KHR) {
 				continue;
 			}
-
-			if (surfFormats[i].format == VK_FORMAT_B8G8R8A8_UNORM || surfFormats[i].format == VK_FORMAT_R8G8B8A8_UNORM) {
-				swapchainFormat_ = surfFormats[i].format;
+			if (surfFormats_[i].format == VK_FORMAT_B8G8R8A8_UNORM || surfFormats_[i].format == VK_FORMAT_R8G8B8A8_UNORM) {
+				swapchainFormat_ = surfFormats_[i].format;
 				break;
 			}
 		}
 		if (swapchainFormat_ == VK_FORMAT_UNDEFINED) {
 			// Okay, take the first one then.
-			swapchainFormat_ = surfFormats[0].format;
+			swapchainFormat_ = surfFormats_[0].format;
 		}
 		INFO_LOG(G3D, "swapchain_format: %d (/%d)", swapchainFormat_, formatCount);
 	}
@@ -937,12 +1219,21 @@ bool VulkanContext::InitSwapchain() {
 	res = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_devices_[physical_device_], surface_, &presentModeCount, presentModes);
 	_dbg_assert_(res == VK_SUCCESS);
 
+	VkExtent2D currentExtent { surfCapabilities_.currentExtent };
+	// https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkSurfaceCapabilitiesKHR.html
+	// currentExtent is the current width and height of the surface, or the special value (0xFFFFFFFF, 0xFFFFFFFF) indicating that the surface size will be determined by the extent of a swapchain targeting the surface.
+	if (currentExtent.width == 0xFFFFFFFFu || currentExtent.height == 0xFFFFFFFFu) {
+		_dbg_assert_((bool)cbGetDrawSize_)
+		if (cbGetDrawSize_) {
+			currentExtent = cbGetDrawSize_();
+		}
+	}
 
-	swapChainExtent_.width = clamp(surfCapabilities_.currentExtent.width, surfCapabilities_.minImageExtent.width, surfCapabilities_.maxImageExtent.width);
-	swapChainExtent_.height = clamp(surfCapabilities_.currentExtent.height, surfCapabilities_.minImageExtent.height, surfCapabilities_.maxImageExtent.height);
+	swapChainExtent_.width = clamp(currentExtent.width, surfCapabilities_.minImageExtent.width, surfCapabilities_.maxImageExtent.width);
+	swapChainExtent_.height = clamp(currentExtent.height, surfCapabilities_.minImageExtent.height, surfCapabilities_.maxImageExtent.height);
 
 	INFO_LOG(G3D, "surfCapabilities_.current: %dx%d min: %dx%d max: %dx%d computed: %dx%d",
-		surfCapabilities_.currentExtent.width, surfCapabilities_.currentExtent.height,
+		currentExtent.width, currentExtent.height,
 		surfCapabilities_.minImageExtent.width, surfCapabilities_.minImageExtent.height,
 		surfCapabilities_.maxImageExtent.width, surfCapabilities_.maxImageExtent.height,
 		swapChainExtent_.width, swapChainExtent_.height);
@@ -999,47 +1290,61 @@ bool VulkanContext::InitSwapchain() {
 	VkSurfaceTransformFlagBitsKHR preTransform;
 	std::string supportedTransforms = surface_transforms_to_string(surfCapabilities_.supportedTransforms);
 	std::string currentTransform = surface_transforms_to_string(surfCapabilities_.currentTransform);
-	g_display_rotation = DisplayRotation::ROTATE_0;
-	g_display_rot_matrix.setIdentity();
+	g_display.rotation = DisplayRotation::ROTATE_0;
+	g_display.rot_matrix.setIdentity();
+
+	uint32_t allowedRotations = VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+	// Hack: Don't allow 270 degrees pretransform (inverse landscape), it creates bizarre issues on some devices (see #15773).
+	allowedRotations &= ~VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+
 	if (surfCapabilities_.currentTransform & (VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR | VK_SURFACE_TRANSFORM_INHERIT_BIT_KHR)) {
 		preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	} else if (surfCapabilities_.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) {
+	} else if (surfCapabilities_.currentTransform & allowedRotations) {
 		// Normal, sensible rotations. Let's handle it.
 		preTransform = surfCapabilities_.currentTransform;
-		g_display_rot_matrix.setIdentity();
+		g_display.rot_matrix.setIdentity();
 		switch (surfCapabilities_.currentTransform) {
 		case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:
-			g_display_rotation = DisplayRotation::ROTATE_90;
-			g_display_rot_matrix.setRotationZ90();
+			g_display.rotation = DisplayRotation::ROTATE_90;
+			g_display.rot_matrix.setRotationZ90();
 			std::swap(swapChainExtent_.width, swapChainExtent_.height);
 			break;
 		case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR:
-			g_display_rotation = DisplayRotation::ROTATE_180;
-			g_display_rot_matrix.setRotationZ180();
+			g_display.rotation = DisplayRotation::ROTATE_180;
+			g_display.rot_matrix.setRotationZ180();
 			break;
 		case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR:
-			g_display_rotation = DisplayRotation::ROTATE_270;
-			g_display_rot_matrix.setRotationZ270();
+			g_display.rotation = DisplayRotation::ROTATE_270;
+			g_display.rot_matrix.setRotationZ270();
 			std::swap(swapChainExtent_.width, swapChainExtent_.height);
 			break;
 		default:
 			_dbg_assert_(false);
 		}
 	} else {
-		// Let the OS rotate the image (potentially slow on many Android devices)
+		// Let the OS rotate the image (potentially slower on many Android devices)
 		preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 	}
 
 	std::string preTransformStr = surface_transforms_to_string(preTransform);
-
 	INFO_LOG(G3D, "Transform supported: %s current: %s chosen: %s", supportedTransforms.c_str(), currentTransform.c_str(), preTransformStr.c_str());
 
 	if (physicalDeviceProperties_[physical_device_].properties.vendorID == VULKAN_VENDOR_IMGTEC) {
-		INFO_LOG(G3D, "Applying PowerVR hack (rounding off the width!)");
-		// Swap chain width hack to avoid issue #11743 (PowerVR driver bug).
-		// To keep the size consistent even with pretransform, do this after the swap. Should be fine.
-		// This is fixed in newer PowerVR drivers but I don't know the cutoff.
-		swapChainExtent_.width &= ~31;
+		u32 driverVersion = physicalDeviceProperties_[physical_device_].properties.driverVersion;
+		// Cutoff the hack at driver version 1.386.1368 (0x00582558, see issue #15773).
+		if (driverVersion < 0x00582558) {
+			INFO_LOG(G3D, "Applying PowerVR hack (rounding off the width!) driverVersion=%08x", driverVersion);
+			// Swap chain width hack to avoid issue #11743 (PowerVR driver bug).
+			// To keep the size consistent even with pretransform, do this after the swap. Should be fine.
+			// This is fixed in newer PowerVR drivers but I don't know the cutoff.
+			swapChainExtent_.width &= ~31;
+
+			// TODO: Also modify display_xres/display_yres appropriately for scissors to match.
+			// This will get a bit messy. Ideally we should remove that logic from app-android.cpp
+			// and move it here, but the OpenGL code still needs it.
+		} else {
+			INFO_LOG(G3D, "PowerVR driver version new enough (%08x), not applying swapchain width hack", driverVersion);
+		}
 	}
 
 	VkSwapchainCreateInfoKHR swap_chain_info{ VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
@@ -1087,6 +1392,10 @@ bool VulkanContext::InitSwapchain() {
 	return true;
 }
 
+void VulkanContext::SetCbGetDrawSize(std::function<VkExtent2D()> cb) {
+	cbGetDrawSize_ = cb;
+}
+
 VkFence VulkanContext::CreateFence(bool presignalled) {
 	VkFence fence;
 	VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
@@ -1097,9 +1406,9 @@ VkFence VulkanContext::CreateFence(bool presignalled) {
 
 void VulkanContext::PerformPendingDeletes() {
 	for (int i = 0; i < ARRAY_SIZE(frame_); i++) {
-		frame_[i].deleteList.PerformDeletes(device_, allocator_);
+		frame_[i].deleteList.PerformDeletes(this, allocator_);
 	}
-	Delete().PerformDeletes(device_, allocator_);
+	Delete().PerformDeletes(this, allocator_);
 }
 
 void VulkanContext::DestroyDevice() {
@@ -1108,6 +1417,10 @@ void VulkanContext::DestroyDevice() {
 	}
 	if (surface_) {
 		ERROR_LOG(G3D, "DestroyDevice: Surface should have been destroyed.");
+	}
+
+	for (int i = 0; i < ARRAY_SIZE(frame_); i++) {
+		frame_[i].profiler.Shutdown();
 	}
 
 	INFO_LOG(G3D, "VulkanContext::DestroyDevice (performing deletes)");
@@ -1120,12 +1433,15 @@ void VulkanContext::DestroyDevice() {
 	device_ = nullptr;
 }
 
-bool VulkanContext::CreateShaderModule(const std::vector<uint32_t> &spirv, VkShaderModule *shaderModule) {
+bool VulkanContext::CreateShaderModule(const std::vector<uint32_t> &spirv, VkShaderModule *shaderModule, const char *tag) {
 	VkShaderModuleCreateInfo sm{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
 	sm.pCode = spirv.data();
 	sm.codeSize = spirv.size() * sizeof(uint32_t);
 	sm.flags = 0;
 	VkResult result = vkCreateShaderModule(device_, &sm, nullptr, shaderModule);
+	if (tag) {
+		SetDebugName(*shaderModule, VK_OBJECT_TYPE_SHADER_MODULE, tag);
+	}
 	if (result != VK_SUCCESS) {
 		return false;
 	} else {
@@ -1133,7 +1449,7 @@ bool VulkanContext::CreateShaderModule(const std::vector<uint32_t> &spirv, VkSha
 	}
 }
 
-void TransitionImageLayout2(VkCommandBuffer cmd, VkImage image, int baseMip, int numMipLevels, VkImageAspectFlags aspectMask,
+void TransitionImageLayout2(VkCommandBuffer cmd, VkImage image, int baseMip, int numMipLevels, int numLayers, VkImageAspectFlags aspectMask,
 	VkImageLayout oldImageLayout, VkImageLayout newImageLayout,
 	VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
 	VkAccessFlags srcAccessMask, VkAccessFlags dstAccessMask) {
@@ -1146,7 +1462,7 @@ void TransitionImageLayout2(VkCommandBuffer cmd, VkImage image, int baseMip, int
 	image_memory_barrier.subresourceRange.aspectMask = aspectMask;
 	image_memory_barrier.subresourceRange.baseMipLevel = baseMip;
 	image_memory_barrier.subresourceRange.levelCount = numMipLevels;
-	image_memory_barrier.subresourceRange.layerCount = 1;  // We never use more than one layer, and old Mali drivers have problems with VK_REMAINING_ARRAY_LAYERS/VK_REMAINING_MIP_LEVELS.
+	image_memory_barrier.subresourceRange.layerCount = numLayers;  // We never use more than one layer, and old Mali drivers have problems with VK_REMAINING_ARRAY_LAYERS/VK_REMAINING_MIP_LEVELS.
 	image_memory_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	image_memory_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	vkCmdPipelineBarrier(cmd, srcStageMask, dstStageMask, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
@@ -1184,10 +1500,10 @@ bool GLSLtoSPV(const VkShaderStageFlagBits shader_type, const char *sourceCode, 
 
 	glslang::TProgram program;
 	const char *shaderStrings[1];
-	TBuiltInResource Resources;
-	init_resources(Resources);
+	TBuiltInResource Resources{};
+	InitShaderResources(Resources);
 
-	int defaultVersion;
+	int defaultVersion = 0;
 	EShMessages messages;
 	EProfile profile;
 
@@ -1260,37 +1576,6 @@ void finalize_glslang() {
 	glslang::FinalizeProcess();
 }
 
-const char *VulkanResultToString(VkResult res) {
-	switch (res) {
-	case VK_NOT_READY: return "VK_NOT_READY";
-	case VK_TIMEOUT: return "VK_TIMEOUT";
-	case VK_EVENT_SET: return "VK_EVENT_SET";
-	case VK_EVENT_RESET: return "VK_EVENT_RESET";
-	case VK_INCOMPLETE: return "VK_INCOMPLETE";
-	case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
-	case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
-	case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
-	case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
-	case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
-	case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
-	case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
-	case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
-	case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
-	case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
-	case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
-	case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
-	case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
-	case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
-	case VK_ERROR_INCOMPATIBLE_DISPLAY_KHR: return "VK_ERROR_INCOMPATIBLE_DISPLAY_KHR";
-	case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR: return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
-	case VK_ERROR_OUT_OF_POOL_MEMORY_KHR: return "VK_ERROR_OUT_OF_POOL_MEMORY_KHR";
-	case VK_ERROR_INVALID_EXTERNAL_HANDLE_KHR: return "VK_ERROR_INVALID_EXTERNAL_HANDLE_KHR";
-
-	default:
-		return "VK_ERROR_...(unknown)";
-	}
-}
-
 void VulkanDeleteList::Take(VulkanDeleteList &del) {
 	_dbg_assert_(cmdPools_.empty());
 	_dbg_assert_(descPools_.empty());
@@ -1344,11 +1629,13 @@ void VulkanDeleteList::Take(VulkanDeleteList &del) {
 	del.callbacks_.clear();
 }
 
-void VulkanDeleteList::PerformDeletes(VkDevice device, VmaAllocator allocator) {
+void VulkanDeleteList::PerformDeletes(VulkanContext *vulkan, VmaAllocator allocator) {
 	for (auto &callback : callbacks_) {
-		callback.func(callback.userdata);
+		callback.func(vulkan, callback.userdata);
 	}
 	callbacks_.clear();
+
+	VkDevice device = vulkan->GetDevice();
 	for (auto &cmdPool : cmdPools_) {
 		vkDestroyCommandPool(device, cmdPool, nullptr);
 	}
@@ -1413,6 +1700,10 @@ void VulkanDeleteList::PerformDeletes(VkDevice device, VmaAllocator allocator) {
 		vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
 	}
 	descSetLayouts_.clear();
+	for (auto &queryPool : queryPools_) {
+		vkDestroyQueryPool(device, queryPool, nullptr);
+	}
+	queryPools_.clear();
 }
 
 void VulkanContext::GetImageMemoryRequirements(VkImage image, VkMemoryRequirements *mem_reqs, bool *dedicatedAllocation) {
@@ -1473,4 +1764,67 @@ std::string FormatDriverVersion(const VkPhysicalDeviceProperties &props) {
 	uint32_t minor = VK_VERSION_MINOR(props.driverVersion);
 	uint32_t branch = VK_VERSION_PATCH(props.driverVersion);
 	return StringFromFormat("%d.%d.%d (%08x)", major, minor, branch, props.driverVersion);
+}
+
+// Mainly just the formats seen on gpuinfo.org for swapchains, as this function is only used for listing
+// those in the UI. Also depth buffers that we used in one place.
+// Might add more in the future if we find more uses for this.
+const char *VulkanFormatToString(VkFormat format) {
+	switch (format) {
+	case VK_FORMAT_A1R5G5B5_UNORM_PACK16: return "A1R5G5B5_UNORM_PACK16";
+	case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return "A2B10G10R10_UNORM_PACK32";
+	case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return "A2R10G10B10_UNORM_PACK32";
+	case VK_FORMAT_A8B8G8R8_SNORM_PACK32: return "A8B8G8R8_SNORM_PACK32";
+	case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return "A8B8G8R8_SRGB_PACK32";
+	case VK_FORMAT_A8B8G8R8_UNORM_PACK32: return "A8B8G8R8_UNORM_PACK32";
+	case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return "B10G11R11_UFLOAT_PACK32";
+	case VK_FORMAT_B4G4R4A4_UNORM_PACK16: return "B4G4R4A4_UNORM_PACK16";
+	case VK_FORMAT_B5G5R5A1_UNORM_PACK16: return "B5G5R5A1_UNORM_PACK16";
+	case VK_FORMAT_B5G6R5_UNORM_PACK16: return "B5G6R5_UNORM_PACK16";
+	case VK_FORMAT_B8G8R8A8_SNORM: return "B8G8R8A8_SNORM";
+	case VK_FORMAT_B8G8R8A8_SRGB: return "B8G8R8A8_SRGB";
+	case VK_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+	case VK_FORMAT_R16G16B16A16_SFLOAT: return "R16G16B16A16_SFLOAT";
+	case VK_FORMAT_R16G16B16A16_SNORM: return "R16G16B16A16_SNORM";
+	case VK_FORMAT_R16G16B16A16_UNORM: return "R16G16B16A16_UNORM";
+	case VK_FORMAT_R4G4B4A4_UNORM_PACK16: return "R4G4B4A4_UNORM_PACK16";
+	case VK_FORMAT_R5G5B5A1_UNORM_PACK16: return "R5G5B5A1_UNORM_PACK16";
+	case VK_FORMAT_R5G6B5_UNORM_PACK16: return "R5G6B5_UNORM_PACK16";
+	case VK_FORMAT_R8G8B8A8_SNORM: return "R8G8B8A8_SNORM";
+	case VK_FORMAT_R8G8B8A8_SRGB: return "R8G8B8A8_SRGB";
+	case VK_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+
+	case VK_FORMAT_D24_UNORM_S8_UINT: return "D24S8";
+	case VK_FORMAT_D16_UNORM: return "D16";
+	case VK_FORMAT_D16_UNORM_S8_UINT: return "D16S8";
+	case VK_FORMAT_D32_SFLOAT: return "D32f";
+	case VK_FORMAT_D32_SFLOAT_S8_UINT: return "D32fS8";
+	case VK_FORMAT_S8_UINT: return "S8";
+	case VK_FORMAT_UNDEFINED: return "UNDEFINED (BAD!)";
+
+	default: return "(format not added to string list)";
+	}
+}
+
+// I miss Rust where this is automatic :(
+const char *VulkanColorSpaceToString(VkColorSpaceKHR colorSpace) {
+	switch (colorSpace) {
+	case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: return "SRGB_NONLINEAR";
+	case VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT: return "DISPLAY_P3_NONLINEAR";
+	case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT: return "EXTENDED_SRGB_LINEAR";
+	case VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT: return "DISPLAY_P3_LINEAR";
+	case VK_COLOR_SPACE_DCI_P3_NONLINEAR_EXT: return "DCI_P3_NONLINEAR"; 
+	case VK_COLOR_SPACE_BT709_LINEAR_EXT: return "BT709_LINEAR";
+	case VK_COLOR_SPACE_BT709_NONLINEAR_EXT: return "BT709_NONLINEAR";
+	case VK_COLOR_SPACE_BT2020_LINEAR_EXT: return "BT2020_LINEAR";
+	case VK_COLOR_SPACE_HDR10_ST2084_EXT: return "HDR10_ST2084";
+	case VK_COLOR_SPACE_DOLBYVISION_EXT: return "DOLBYVISION";
+	case VK_COLOR_SPACE_HDR10_HLG_EXT: return "HDR10_HLG";
+	case VK_COLOR_SPACE_ADOBERGB_LINEAR_EXT: return "ADOBERGB_LINEAR";
+	case VK_COLOR_SPACE_ADOBERGB_NONLINEAR_EXT: return "ADOBERGB_NONLINEAR";
+	case VK_COLOR_SPACE_PASS_THROUGH_EXT: return "PASS_THROUGH";
+	case VK_COLOR_SPACE_EXTENDED_SRGB_NONLINEAR_EXT: return "EXTENDED_SRGB_NONLINEAR";
+	case VK_COLOR_SPACE_DISPLAY_NATIVE_AMD: return "DISPLAY_NATIVE_AMD";
+	default: return "(unknown)";
+	}
 }

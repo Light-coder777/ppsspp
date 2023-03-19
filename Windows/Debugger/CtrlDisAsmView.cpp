@@ -12,12 +12,13 @@
 #include "Core/MIPS/MIPSAsm.h"
 #include "Core/MIPS/MIPSAnalyst.h"
 #include "Core/Config.h"
+#include "Core/Debugger/SymbolMap.h"
+#include "Core/Reporting.h"
 #include "Common/StringUtils.h"
 #include "Windows/Debugger/CtrlDisAsmView.h"
 #include "Windows/Debugger/Debugger_MemoryDlg.h"
 #include "Windows/Debugger/DebuggerShared.h"
 #include "Windows/Debugger/BreakpointWindow.h"
-#include "Core/Debugger/SymbolMap.h"
 #include "Windows/main.h"
 
 #include "Common/CommonWindows.h"
@@ -30,6 +31,9 @@
 #include <set>
 
 TCHAR CtrlDisAsmView::szClassName[] = _T("CtrlDisAsmView");
+
+static constexpr UINT_PTR IDT_REDRAW = 0xC0DE0001;
+static constexpr UINT REDRAW_DELAY = 1000 / 60;
 
 void CtrlDisAsmView::init()
 {
@@ -138,6 +142,16 @@ LRESULT CALLBACK CtrlDisAsmView::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 			}
 		}
 		return DLGC_WANTCHARS|DLGC_WANTARROWS;
+
+	case WM_TIMER:
+		if (wParam == IDT_REDRAW) {
+			InvalidateRect(hwnd, nullptr, FALSE);
+			UpdateWindow(hwnd);
+			ccp->redrawScheduled_ = false;
+			KillTimer(hwnd, wParam);
+		}
+		break;
+
 	default:
 		break;
 	}
@@ -158,7 +172,7 @@ CtrlDisAsmView::CtrlDisAsmView(HWND _wnd)
 	SetWindowLong(wnd, GWL_STYLE, GetWindowLong(wnd,GWL_STYLE) | WS_VSCROLL);
 	SetScrollRange(wnd, SB_VERT, -1, 1, TRUE);
 
-	const float fontScale = 1.0f / g_dpi_scale_real_y;
+	const float fontScale = 1.0f / g_display.dpi_scale_real_y;
 	charWidth = g_Config.iFontWidth * fontScale;
 	rowHeight = (g_Config.iFontHeight + 2) * fontScale;
 	int scaledFontHeight = g_Config.iFontHeight * fontScale;
@@ -177,7 +191,7 @@ CtrlDisAsmView::CtrlDisAsmView(HWND _wnd)
 
 	matchAddress = -1;
 	searching = false;
-	searchQuery = "";
+	searchQuery.clear();
 	windowStart = curAddress;
 	whiteBackground = false;
 	displaySymbols = true;
@@ -192,15 +206,15 @@ CtrlDisAsmView::~CtrlDisAsmView()
 	manager.clear();
 }
 
-COLORREF scaleColor(COLORREF color, float factor)
+static COLORREF scaleColor(COLORREF color, float factor)
 {
 	unsigned char r = color & 0xFF;
 	unsigned char g = (color >> 8) & 0xFF;
 	unsigned char b = (color >> 16) & 0xFF;
 
-	r = min(255,max((int)(r*factor),0));
-	g = min(255,max((int)(g*factor),0));
-	b = min(255,max((int)(b*factor),0));
+	r = std::min(255, std::max((int)(r * factor), 0));
+	g = std::min(255, std::max((int)(g * factor), 0));
+	b = std::min(255, std::max((int)(b * factor), 0));
 
 	return (color & 0xFF000000) | (b << 16) | (g << 8) | r;
 }
@@ -290,6 +304,7 @@ void CtrlDisAsmView::assembleOpcode(u32 address, std::string defaultText)
 					if (strcasecmp(debugger->GetRegName(cat,reg),registerName.c_str()) == 0)
 					{
 						debugger->SetRegValue(cat,reg,value);
+						Reporting::NotifyDebugger();
 						SendMessage(GetParent(wnd),WM_DEB_UPDATE,0,0);
 						return;
 					}
@@ -300,7 +315,8 @@ void CtrlDisAsmView::assembleOpcode(u32 address, std::string defaultText)
 		// try to assemble the input if it failed
 	}
 
-	result = MIPSAsm::MipsAssembleOpcode(op.c_str(),debugger,address);
+	result = MIPSAsm::MipsAssembleOpcode(op.c_str(), debugger, address);
+	Reporting::NotifyDebugger();
 	if (result == true)
 	{
 		scanFunctions();
@@ -310,14 +326,12 @@ void CtrlDisAsmView::assembleOpcode(u32 address, std::string defaultText)
 
 		redraw();
 	} else {
-		std::wstring error = MIPSAsm::GetAssembleError();
+		std::wstring error = ConvertUTF8ToWString(MIPSAsm::GetAssembleError());
 		MessageBox(wnd,error.c_str(),L"Error",MB_OK);
 	}
 }
 
-
-void CtrlDisAsmView::drawBranchLine(HDC hdc, std::map<u32,int>& addressPositions, BranchLine& line)
-{
+void CtrlDisAsmView::drawBranchLine(HDC hdc, std::map<u32,int> &addressPositions, const BranchLine &line) {
 	HPEN pen;
 	u32 windowEnd = manager.getNthNextAddress(windowStart,visibleRows);
 	
@@ -546,7 +560,7 @@ void CtrlDisAsmView::onPaint(WPARAM wParam, LPARAM lParam)
 		if (CBreakPoints::IsAddressBreakPoint(address,&enabled))
 		{
 			if (enabled) textColor = 0x0000FF;
-			int yOffset = max(-1,(rowHeight-14+1)/2);
+			int yOffset = std::max(-1, (rowHeight - 14 + 1) / 2);
 			if (!enabled) yOffset++;
 			DrawIconEx(hdc,2,rowY1+1+yOffset,enabled ? breakPoint : breakPointDisable,32,32,0,0,DI_NORMAL);
 		}
@@ -710,7 +724,7 @@ void CtrlDisAsmView::onKeyDown(WPARAM wParam, LPARAM lParam)
 			break;
 		case 'c':
 		case VK_INSERT:
-			copyInstructions(selectRangeStart, selectRangeEnd, true);
+			CopyInstructions(selectRangeStart, selectRangeEnd, CopyInstructionsMode::DISASM);
 			break;
 		case 'x':
 			disassembleToFile();
@@ -835,8 +849,10 @@ void CtrlDisAsmView::redraw()
 	GetClientRect(wnd, &rect);
 	visibleRows = rect.bottom/rowHeight;
 
-	InvalidateRect(wnd, NULL, FALSE);
-	UpdateWindow(wnd); 
+	if (!redrawScheduled_) {
+		SetTimer(wnd, IDT_REDRAW, REDRAW_DELAY, nullptr);
+		redrawScheduled_ = true;
+	}
 }
 
 void CtrlDisAsmView::toggleBreakpoint(bool toggleEnabled)
@@ -889,10 +905,8 @@ void CtrlDisAsmView::onMouseDown(WPARAM wParam, LPARAM lParam, int button)
 	redraw();
 }
 
-void CtrlDisAsmView::copyInstructions(u32 startAddr, u32 endAddr, bool withDisasm)
-{
-	if (withDisasm == false)
-	{
+void CtrlDisAsmView::CopyInstructions(u32 startAddr, u32 endAddr, CopyInstructionsMode mode) {
+	if (mode != CopyInstructionsMode::DISASM) {
 		int instructionSize = debugger->getInstructionSize(0);
 		int count = (endAddr - startAddr) / instructionSize;
 		int space = count * 32;
@@ -901,7 +915,8 @@ void CtrlDisAsmView::copyInstructions(u32 startAddr, u32 endAddr, bool withDisas
 		char *p = temp, *end = temp + space;
 		for (u32 pos = startAddr; pos < endAddr && p < end; pos += instructionSize)
 		{
-			p += snprintf(p, end - p, "%08X", debugger->readMemory(pos));
+			u32 data = mode == CopyInstructionsMode::OPCODES ? debugger->readMemory(pos) : pos;
+			p += snprintf(p, end - p, "%08X", data);
 
 			// Don't leave a trailing newline.
 			if (pos + instructionSize < endAddr && p < end)
@@ -909,10 +924,19 @@ void CtrlDisAsmView::copyInstructions(u32 startAddr, u32 endAddr, bool withDisas
 		}
 		W32Util::CopyTextToClipboard(wnd, temp);
 		delete [] temp;
-	} else
-	{
+	} else {
 		std::string disassembly = disassembleRange(startAddr,endAddr-startAddr);
 		W32Util::CopyTextToClipboard(wnd, disassembly.c_str());
+	}
+}
+
+void CtrlDisAsmView::NopInstructions(u32 selectRangeStart, u32 selectRangeEnd) {
+	for (u32 addr = selectRangeStart; addr < selectRangeEnd; addr += 4) {
+		Memory::Write_U32(0, addr);
+	}
+
+	if (currentMIPS) {
+		currentMIPS->InvalidateICache(selectRangeStart, selectRangeEnd - selectRangeStart);
 	}
 }
 
@@ -939,14 +963,17 @@ void CtrlDisAsmView::onMouseUp(WPARAM wParam, LPARAM lParam, int button)
 			assembleOpcode(curAddress,"");
 			break;
 		case ID_DISASM_COPYINSTRUCTIONDISASM:
-			copyInstructions(selectRangeStart, selectRangeEnd, true);
+			CopyInstructions(selectRangeStart, selectRangeEnd, CopyInstructionsMode::DISASM);
 			break;
 		case ID_DISASM_COPYADDRESS:
-			{
-				char temp[16];
-				sprintf(temp,"%08X",curAddress);
-				W32Util::CopyTextToClipboard(wnd, temp);
-			}
+			CopyInstructions(selectRangeStart, selectRangeEnd, CopyInstructionsMode::ADDRESSES);
+			break;
+		case ID_DISASM_COPYINSTRUCTIONHEX:
+			CopyInstructions(selectRangeStart, selectRangeEnd, CopyInstructionsMode::OPCODES);
+			break;
+		case ID_DISASM_NOPINSTRUCTION:
+			NopInstructions(selectRangeStart, selectRangeEnd);
+			redraw();
 			break;
 		case ID_DISASM_SETPCTOHERE:
 			debugger->setPC(curAddress);
@@ -954,9 +981,6 @@ void CtrlDisAsmView::onMouseUp(WPARAM wParam, LPARAM lParam, int button)
 			break;
 		case ID_DISASM_FOLLOWBRANCH:
 			followBranch();
-			break;
-		case ID_DISASM_COPYINSTRUCTIONHEX:
-			copyInstructions(selectRangeStart, selectRangeEnd, false);
 			break;
 		case ID_DISASM_RUNTOHERE:
 			{
@@ -1071,7 +1095,6 @@ void CtrlDisAsmView::onMouseMove(WPARAM wParam, LPARAM lParam, int button)
 	{
 		int y = HIWORD(lParam);
 		setCurAddress(yToAddress(y), KeyDownAsync(VK_SHIFT));
-		// TODO: Perhaps don't do this every time, but on a timer?
 		redraw();
 	}
 }	

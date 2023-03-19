@@ -17,7 +17,6 @@
 
 #pragma once
 
-#include <map>
 #include <d3d11.h>
 #include <d3d11_1.h>
 
@@ -118,7 +117,10 @@ public:
 class DrawEngineD3D11 : public DrawEngineCommon {
 public:
 	DrawEngineD3D11(Draw::DrawContext *draw, ID3D11Device *device, ID3D11DeviceContext *context);
-	virtual ~DrawEngineD3D11();
+	~DrawEngineD3D11();
+
+	void DeviceLost() override { draw_ = nullptr;  }
+	void DeviceRestore(Draw::DrawContext *draw) override { draw_ = draw; }
 
 	void SetShaderManager(ShaderManagerD3D11 *shaderManager) {
 		shaderManager_ = shaderManager;
@@ -151,16 +153,17 @@ public:
 
 	void ClearTrackedVertexArrays() override;
 
-	void Resized() override;
+	void NotifyConfigChanged() override;
 
 	void ClearInputLayoutMap();
 
 private:
+	void Invalidate(InvalidationCallbackFlags flags);
+
 	void DoFlush();
 
 	void ApplyDrawState(int prim);
 	void ApplyDrawStateLate(bool applyStencilRef, uint8_t stencilRef);
-	void ResetFramebufferRead();
 
 	ID3D11InputLayout *SetupDecFmtForDraw(D3D11VertexShader *vshader, const DecVtxFormat &decFmt, u32 pspFmt);
 

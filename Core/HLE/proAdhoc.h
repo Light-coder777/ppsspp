@@ -38,14 +38,14 @@
 #define PACK __attribute__((packed))
 #endif
 
-#include <thread>
-#include <mutex>
 #include <atomic>
+#include <climits>
+#include <mutex>
+#include <thread>
 
 #include "Common/Net/Resolve.h"
 #include "Common/Serialize/Serializer.h"
 
-#include "Core/Config.h"
 #include "Core/CoreTiming.h"
 #include "Core/MemMap.h"
 #include "Core/HLE/HLE.h"
@@ -61,7 +61,9 @@
 #undef ECONNABORTED
 #undef ECONNRESET
 #undef ECONNREFUSED
+#undef ENETUNREACH
 #undef ENOTCONN
+#undef EBADF
 #undef EAGAIN
 #undef EINPROGRESS
 #undef EISCONN
@@ -73,7 +75,9 @@
 #define ECONNABORTED WSAECONNABORTED
 #define ECONNRESET WSAECONNRESET
 #define ECONNREFUSED WSAECONNREFUSED
+#define ENETUNREACH WSAENETUNREACH
 #define ENOTCONN WSAENOTCONN
+#define EBADF WSAEBADF
 #define EAGAIN WSAEWOULDBLOCK
 #define EINPROGRESS WSAEWOULDBLOCK
 #define EISCONN WSAEISCONN
@@ -294,11 +298,12 @@ typedef struct SceNetAdhocctlPeerInfo {
   SceNetAdhocctlPeerInfo * next;
   SceNetAdhocctlNickname nickname;
   SceNetEtherAddr mac_addr;
-  u16_le padding;
+  u16_le padding; // a copy of the padding(?) from SceNetAdhocctlPeerInfoEmu
   u32_le flags;
   u64_le last_recv; // Need to use the same method with sceKernelGetSystemTimeWide (ie. CoreTiming::GetGlobalTimeUsScaled) to prevent timing issue (ie. in game timeout)
   
   u32_le ip_addr; // internal use only
+  u16_le port_offset; // IP-specific port offset (internal use only)
 } PACK SceNetAdhocctlPeerInfo;
 
 // Peer Information with u32 pointers
@@ -306,7 +311,7 @@ typedef struct SceNetAdhocctlPeerInfoEmu {
   u32_le next; // Changed the pointer to u32
   SceNetAdhocctlNickname nickname;
   SceNetEtherAddr mac_addr;
-  u16_le padding; //00 00
+  u16_le padding; //00 00 // Note: Not sure whether this is really padding or reserved/unknown field
   u32_le flags; //00 04 00 00 on KHBBS and FF FF FF FF on Ys vs. Sora no Kiseki // State of the peer? Or related to sceNetAdhocAuth_CF4D9BED ?
   u64_le last_recv; // Need to use the same method with sceKernelGetSystemTimeWide (ie. CoreTiming::GetGlobalTimeUsScaled) to prevent timing issue (ie. in game timeout)
 } PACK SceNetAdhocctlPeerInfoEmu;
@@ -393,7 +398,9 @@ typedef struct AdhocSocket {
 	s32 retry_interval; // related to keepalive
 	s32 retry_count; // multiply with retry interval to be used as keepalive timeout
 	s32 attemptCount; // connect/accept attempts
-	u64 lastAttempt; // timestamp to retry again
+	u64 lastAttempt; // timestamp to retry again (attempted by the game)
+	u64 internalLastAttempt; // timestamp to retry again (internal use only)
+	bool isClient; // true if the game is using local port 0 when creating the socket
 	union {
 		SceNetAdhocPdpStat pdp;
 		SceNetAdhocPtpStat ptp;
@@ -732,7 +739,7 @@ enum {
 #define PSP_ADHOC_MATCHING_MODE_P2P				3
 
 // Matching Events
-#define PSP_ADHOC_MATCHING_EVENT_HELLO			1
+#define PSP_ADHOC_MATCHING_EVENT_HELLO			1	// Should be ignored when Join Request is in progress ?
 #define PSP_ADHOC_MATCHING_EVENT_REQUEST		2
 #define PSP_ADHOC_MATCHING_EVENT_LEAVE			3
 #define PSP_ADHOC_MATCHING_EVENT_DENY			4
@@ -1007,10 +1014,10 @@ bool isPDPPortInUse(uint16_t port);
 bool isPTPPortInUse(uint16_t port, bool forListen, SceNetEtherAddr* dstmac = nullptr, uint16_t dstport = 0);
 
 // Convert IPv4 address to string (Replacement for inet_ntoa since it's getting deprecated)
-std::string ip2str(in_addr in);
+std::string ip2str(in_addr in, bool maskPublicIP = true);
 
 // Convert MAC address to string
-std::string mac2str(SceNetEtherAddr* mac);
+std::string mac2str(const SceNetEtherAddr *mac);
 
 /*
  * Matching Members
@@ -1337,6 +1344,11 @@ int setSockMSS(int sock, int size);
 int setSockTimeout(int sock, int opt, unsigned long timeout_usec);
 
 /*
+ * Get Socket SO_ERROR (Requests and clears pending error information on the socket)
+ */
+int getSockError(int sock);
+
+/*
  * Get TCP Socket TCP_NODELAY (Nagle Algo)
  */
 int getSockNoDelay(int tcpsock);
@@ -1448,9 +1460,10 @@ bool resolveIP(uint32_t ip, SceNetEtherAddr * mac);
  * Resolve MAC to IP
  * @param mac Peer MAC Address
  * @param ip OUT: Peer IP
+ * @param port_offset OUT: Peer IP-specific Port Offset
  * @return true on success
  */
-bool resolveMAC(SceNetEtherAddr * mac, uint32_t * ip);
+bool resolveMAC(SceNetEtherAddr* mac, uint32_t* ip, u16* port_offset = nullptr);
 
 /**
  * Check whether Network Name contains only valid symbols

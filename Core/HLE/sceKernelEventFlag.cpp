@@ -254,6 +254,7 @@ u32 sceKernelCancelEventFlag(SceUID uid, u32 pattern, u32 numWaitThreadsPtr) {
 		if (__KernelClearEventFlagThreads(e, SCE_KERNEL_ERROR_WAIT_CANCEL))
 			hleReSchedule("event flag canceled");
 
+		hleEatCycles(580);
 		return hleLogSuccessI(SCEKERNEL, 0);
 	} else {
 		return hleLogDebug(SCEKERNEL, error, "invalid event flag");
@@ -405,7 +406,7 @@ int sceKernelWaitEventFlag(SceUID id, u32 bits, u32 wait, u32 outBitsPtr, u32 ti
 			(void)hleLogSuccessI(SCEKERNEL, 0);
 		}
 
-		hleEatCycles(600);
+		hleEatCycles(500);
 		return 0;
 	} else {
 		return hleLogDebug(SCEKERNEL, error, "invalid event flag");
@@ -473,6 +474,7 @@ int sceKernelWaitEventFlagCB(SceUID id, u32 bits, u32 wait, u32 outBitsPtr, u32 
 			hleCheckCurrentCallbacks();
 		}
 
+		hleEatCycles(500);
 		return 0;
 	} else {
 		return hleLogDebug(SCEKERNEL, error, "invalid event flag");
@@ -491,6 +493,8 @@ int sceKernelPollEventFlag(SceUID id, u32 bits, u32 wait, u32 outBitsPtr) {
 	if (bits == 0) {
 		return hleLogDebug(SCEKERNEL, SCE_KERNEL_ERROR_EVF_ILPAT, "bad pattern");
 	}
+
+	hleEatCycles(360);
 
 	u32 error;
 	EventFlag *e = kernelObjects.Get<EventFlag>(id, error);
@@ -518,14 +522,17 @@ u32 sceKernelReferEventFlagStatus(SceUID id, u32 statusPtr) {
 	u32 error;
 	EventFlag *e = kernelObjects.Get<EventFlag>(id, error);
 	if (e) {
-		if (!Memory::IsValidAddress(statusPtr))
+		auto status = PSPPointer<NativeEventFlag>::Create(statusPtr);
+		if (!status.IsValid())
 			return hleLogWarning(SCEKERNEL, -1, "invalid ptr");
 
 		HLEKernel::CleanupWaitingThreads(WAITTYPE_EVENTFLAG, id, e->waitingThreads);
 
 		e->nef.numWaitThreads = (int) e->waitingThreads.size();
-		if (Memory::Read_U32(statusPtr) != 0)
-			Memory::WriteStruct(statusPtr, &e->nef);
+		if (status->size != 0) {
+			*status = e->nef;
+			status.NotifyWrite("EventFlagStatus");
+		}
 		return hleLogSuccessI(SCEKERNEL, 0);
 	} else {
 		return hleLogDebug(SCEKERNEL, error, "invalid event flag");

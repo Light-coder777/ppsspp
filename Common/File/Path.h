@@ -111,12 +111,15 @@ public:
 		return path_ != other.path_ || type_ != other.type_;
 	}
 
-	bool FilePathContains(const std::string &needle) const;
+	bool FilePathContainsNoCase(const std::string &needle) const;
 
 	bool StartsWith(const Path &other) const;
 
 	bool operator <(const Path &other) const {
 		return path_ < other.path_;
+	}
+	bool operator >(const Path &other) const {
+		return path_ > other.path_;
 	}
 
 private:

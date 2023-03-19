@@ -40,10 +40,6 @@ void FragmentTestCacheGLES::DeviceRestore(Draw::DrawContext *draw) {
 }
 
 void FragmentTestCacheGLES::BindTestTexture(int slot) {
-	if (!g_Config.bFragmentTestCache) {
-		return;
-	}
-
 	bool alphaNeedsTexture = gstate.isAlphaTestEnabled() && !IsAlphaTestAgainstZero() && !IsAlphaTestTriviallyTrue();
 	bool colorNeedsTexture = gstate.isColorTestEnabled() && !IsColorTestAgainstZero() && !IsColorTestTriviallyTrue();
 	if (!alphaNeedsTexture && !colorNeedsTexture) {
@@ -144,8 +140,8 @@ GLRTexture *FragmentTestCacheGLES::CreateTestTexture(const GEComparison funcs[4]
 		}
 	}
 
-	GLRTexture *tex = render_->CreateTexture(GL_TEXTURE_2D, 256, 1, 1);
-	render_->TextureImage(tex, 0, 256, 1, Draw::DataFormat::R8G8B8A8_UNORM, data);
+	GLRTexture *tex = render_->CreateTexture(GL_TEXTURE_2D, 256, 1, 1, 1);
+	render_->TextureImage(tex, 0, 256, 1, 1, Draw::DataFormat::R8G8B8A8_UNORM, data);
 	return tex;
 }
 
@@ -156,7 +152,7 @@ void FragmentTestCacheGLES::Clear(bool deleteThem) {
 		}
 	}
 	cache_.clear();
-	lastTexture_ = 0;
+	lastTexture_ = nullptr;
 }
 
 void FragmentTestCacheGLES::Decimate() {
@@ -173,5 +169,5 @@ void FragmentTestCacheGLES::Decimate() {
 		decimationCounter_ = FRAGTEST_DECIMATION_INTERVAL;
 	}
 
-	lastTexture_ = 0;
+	lastTexture_ = nullptr;
 }

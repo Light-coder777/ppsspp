@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include "Core/Config.h"
 #include "Core/Debugger/WebSocket/GameSubscriber.h"
 #include "Core/Debugger/WebSocket/WebSocketUtils.h"
 #include "Core/ELF/ParamSFO.h"
@@ -48,9 +49,8 @@ void WebSocketGameReset(DebuggerRequest &req) {
 	if (needBreak)
 		PSP_CoreParameter().startBreak = true;
 
-	PSP_Shutdown();
 	std::string resetError;
-	if (!PSP_Init(PSP_CoreParameter(), &resetError)) {
+	if (!PSP_Reboot(&resetError)) {
 		ERROR_LOG(BOOT, "Error resetting: %s", resetError.c_str());
 		return req.Fail("Could not reset");
 	}

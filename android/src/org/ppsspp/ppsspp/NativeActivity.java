@@ -25,7 +25,6 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.PowerManager;
 import android.os.Vibrator;
-import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import androidx.documentfile.provider.DocumentFile;
 import android.text.InputType;
@@ -381,6 +380,9 @@ public abstract class NativeActivity extends Activity {
 		}
 
 		int deviceType = NativeApp.DEVICE_TYPE_MOBILE;
+		if (isVRDevice()) {
+			deviceType = NativeApp.DEVICE_TYPE_VR;
+		}
 		UiModeManager uiModeManager = (UiModeManager) getSystemService(UI_MODE_SERVICE);
 		switch (uiModeManager.getCurrentModeType()) {
 		case Configuration.UI_MODE_TYPE_TELEVISION:
@@ -395,8 +397,6 @@ public abstract class NativeActivity extends Activity {
 		}
 
 		isXperiaPlay = IsXperiaPlay();
-
-		String libraryDir = getApplicationLibraryDir(appInfo);
 
 		String extStorageState = Environment.getExternalStorageState();
 		String extStorageDir = Environment.getExternalStorageDirectory().getAbsolutePath();
@@ -443,7 +443,7 @@ public abstract class NativeActivity extends Activity {
 		overrideShortcutParam = null;
 
 		NativeApp.audioConfig(optimalFramesPerBuffer, optimalSampleRate);
-		NativeApp.init(model, deviceType, languageRegion, apkFilePath, dataDir, extStorageDir, externalFilesDir, additionalStorageDirs, libraryDir, cacheDir, shortcut, Build.VERSION.SDK_INT, Build.BOARD);
+		NativeApp.init(model, deviceType, languageRegion, apkFilePath, dataDir, extStorageDir, externalFilesDir, additionalStorageDirs, cacheDir, shortcut, Build.VERSION.SDK_INT, Build.BOARD);
 
 		// Allow C++ to tell us to use JavaGL or not.
 		javaGL = "true".equalsIgnoreCase(NativeApp.queryConfig("androidJavaGL"));
@@ -451,9 +451,7 @@ public abstract class NativeActivity extends Activity {
 		sendInitialGrants();
 
 		// OK, config should be initialized, we can query for screen rotation.
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.GINGERBREAD) {
-			updateScreenRotation("Initialize");
-		}
+		updateScreenRotation("Initialize");
 
 		// Detect OpenGL support.
 		// We don't currently use this detection for anything but good to have in the log.
@@ -574,17 +572,17 @@ public abstract class NativeActivity extends Activity {
 		public void run() {
 			Log.i(TAG, "Starting the render loop: " + mSurface);
 			// Start emulation using the provided Surface.
-			if (!runEGLRenderLoop(mSurface)) {
+			if (!runVulkanRenderLoop(mSurface)) {
 				// Shouldn't happen.
-				Log.e(TAG, "Failed to start up OpenGL/Vulkan");
+				Log.e(TAG, "Failed to start up OpenGL/Vulkan - runVulkanRenderLoop returned false");
 			}
 			Log.i(TAG, "Left the render loop: " + mSurface);
 		}
 	};
 
-	public native boolean runEGLRenderLoop(Surface surface);
+	public native boolean runVulkanRenderLoop(Surface surface);
 	// Tells the render loop thread to exit, so we can restart it.
-	public native void exitEGLRenderLoop();
+	public native void requestExitVulkanRenderLoop();
 
 	@Override
 	public void onCreate(Bundle savedInstanceState) {
@@ -620,7 +618,7 @@ public abstract class NativeActivity extends Activity {
 		if (javaGL) {
 			mGLSurfaceView = new NativeGLView(this);
 			nativeRenderer = new NativeRenderer(this);
-			mGLSurfaceView.setEGLContextClientVersion(2);
+			mGLSurfaceView.setEGLContextClientVersion(isVRDevice() ? 3 : 2);
 			sizeManager.setSurfaceView(mGLSurfaceView);
 
 			// Setup the GLSurface and ask android for the correct
@@ -689,17 +687,17 @@ public abstract class NativeActivity extends Activity {
 		updateSustainedPerformanceMode();
 	}
 
-	// Invariants: After this, mRenderLoopThread will be set, and the thread will be running.
+	// Invariants: After this, mRenderLoopThread will be set, and the thread will be running,
+	// if in Vulkan mode.
 	protected synchronized void ensureRenderLoop() {
 		if (javaGL) {
-			Log.e(TAG, "JavaGL - should not get into ensureRenderLoop.");
+			Log.e(TAG, "JavaGL mode - should not get into ensureRenderLoop.");
 			return;
 		}
 		if (mSurface == null) {
 			Log.w(TAG, "ensureRenderLoop - not starting thread, needs surface");
 			return;
 		}
-
 		if (mRenderLoopThread == null) {
 			Log.w(TAG, "ensureRenderLoop: Starting thread");
 			mRenderLoopThread = new Thread(mEmulationRunner);
@@ -716,8 +714,8 @@ public abstract class NativeActivity extends Activity {
 
 		if (mRenderLoopThread != null) {
 			// This will wait until the thread has exited.
-			Log.i(TAG, "exitEGLRenderLoop");
-			exitEGLRenderLoop();
+			Log.i(TAG, "requestExitVulkanRenderLoop");
+			requestExitVulkanRenderLoop();
 			try {
 				Log.i(TAG, "joining render loop thread...");
 				mRenderLoopThread.join();
@@ -788,6 +786,11 @@ public abstract class NativeActivity extends Activity {
 			initialized = false;
 		}
 		navigationCallbackView = null;
+
+		// Workaround for VR issues when PPSSPP restarts
+		if (isVRDevice()) {
+			System.exit(0);
+		}
 	}
 
 	@Override
@@ -835,9 +838,7 @@ public abstract class NativeActivity extends Activity {
 		}
 
 		// OK, config should be initialized, we can query for screen rotation.
-		if (javaGL || Build.VERSION.SDK_INT >= Build.VERSION_CODES.GINGERBREAD) {
-			updateScreenRotation("onResume");
-		}
+		updateScreenRotation("onResume");
 
 		Log.i(TAG, "onResume");
 		if (javaGL) {
@@ -1151,7 +1152,7 @@ public abstract class NativeActivity extends Activity {
 					}
 				}
 			} catch (Exception e) {
-				Log.w(TAG, "Exception receiving image: " + e.toString());
+				Log.w(TAG, "Exception receiving image: " + e);
 			}
 		} else if (requestCode == RESULT_OPEN_DOCUMENT) {
 			Uri selectedFile = data.getData();
@@ -1231,6 +1232,12 @@ public abstract class NativeActivity extends Activity {
 
 	// The return value is sent to C++ via seqID.
 	public void inputBox(final String seqID, final String title, String defaultText, String defaultAction) {
+		// Workaround for issue #13363 to fix Split/Second game start
+		if (isVRDevice()) {
+			NativeApp.sendInputBox(seqID, false, defaultText);
+			return;
+		}
+
 		final FrameLayout fl = new FrameLayout(this);
 		final EditText input = new EditText(this);
 		input.setGravity(Gravity.CENTER);
@@ -1466,9 +1473,7 @@ public abstract class NativeActivity extends Activity {
 					Log.i(TAG, "Must recreate activity on rotation");
 				}
 			} else {
-				if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.GINGERBREAD) {
-					updateScreenRotation("rotate");
-				}
+				updateScreenRotation("rotate");
 			}
 		} else if (command.equals("sustainedPerfMode")) {
 			updateSustainedPerformanceMode();
@@ -1547,5 +1552,9 @@ public abstract class NativeActivity extends Activity {
 			startActivity(getIntent());
 			finish();
 		}
+	}
+
+	public static boolean isVRDevice() {
+		return BuildConfig.FLAVOR.startsWith("vr");
 	}
 }

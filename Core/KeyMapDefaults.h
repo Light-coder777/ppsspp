@@ -12,8 +12,10 @@ enum DefaultMaps {
 	DEFAULT_MAPPING_OUYA,
 	DEFAULT_MAPPING_XPERIA_PLAY,
 	DEFAULT_MAPPING_MOQI_I7S,
+	DEFAULT_MAPPING_RETRO_STATION_CONTROLLER,
+	DEFAULT_MAPPING_VR_HEADSET,
 };
 
 void SetDefaultKeyMap(DefaultMaps dmap, bool replace);
 
-}
+}  // namespace

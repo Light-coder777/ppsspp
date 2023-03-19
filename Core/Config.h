@@ -46,6 +46,7 @@ namespace http {
 }
 
 struct UrlEncoder;
+struct ConfigPrivate;
 
 struct ConfigTouchPos {
 	float x;
@@ -60,6 +61,7 @@ struct ConfigCustomButton {
 	int image;
 	int shape;
 	bool toggle;
+	bool repeat;
 };
 
 struct Config {
@@ -137,9 +139,10 @@ public:
 	int iInternalScreenRotation;  // The internal screen rotation angle. Useful for vertical SHMUPs and similar.
 
 	std::string sReportHost;
-	std::vector<std::string> recentIsos;
 	std::vector<std::string> vPinnedPaths;
 	std::string sLanguageIni;
+
+	std::string sIgnoreCompatSettings;
 
 	bool bDiscordPresence;  // Enables setting the Discord presence to the current game (or menu)
 
@@ -157,20 +160,27 @@ public:
 	bool bSoftwareRendering;
 	bool bSoftwareRenderingJit;
 	bool bHardwareTransform; // only used in the GLES backend
-	bool bSoftwareSkinning;  // may speed up some games
+	bool bSoftwareSkinning;
 	bool bVendorBugChecksEnabled;
+	bool bUseGeometryShader;
 
-	int iRenderingMode; // 0 = non-buffered rendering 1 = buffered rendering
+	// Speedhacks (more will be moved here):
+	bool bSkipBufferEffects;
+
 	int iTexFiltering; // 1 = auto , 2 = nearest , 3 = linear , 4 = auto max quality
 	int iBufFilter; // 1 = linear, 2 = nearest
-	int iSmallDisplayZoomType;  // Used to fit display into screen 0 = stretch, 1 = partial stretch, 2 = auto scaling, 3 = manual scaling.
-	float fSmallDisplayOffsetX; // Along with Y it goes from 0.0 to 1.0, XY (0.5, 0.5) = center of the screen
-	float fSmallDisplayOffsetY;
-	float fSmallDisplayZoomLevel; //This is used for zoom values, both in and out.
-	bool bImmersiveMode;  // Mode on Android Kitkat 4.4 that hides the back button etc.
+
+	bool bDisplayStretch;  // Automatically matches the aspect ratio of the window.
+	float fDisplayOffsetX;
+	float fDisplayOffsetY;
+	float fDisplayScale;   // Relative to the most constraining axis (x or y).
+	float fDisplayAspectRatio;  // Stored relative to the PSP's native ratio, so 1.0 is the normal pixel aspect ratio.
+
+	bool bImmersiveMode;  // Mode on Android Kitkat 4.4 and later that hides the back button etc.
 	bool bSustainedPerformanceMode;  // Android: Slows clocks down to avoid overheating/speed fluctuations.
 	bool bIgnoreScreenInsets;  // Android: Center screen disregarding insets if this is enabled.
 	bool bVSync;
+
 	int iFrameSkip;
 	int iFrameSkipType;
 	int iFastForwardMode; // See FastForwardMode in ConfigValues.h.
@@ -185,29 +195,35 @@ public:
 	int iWindowY;
 	int iWindowWidth;  // Windows and other windowed environments
 	int iWindowHeight;
+	bool bShowMenuBar;  // Windows-only
+
+	float fUITint;
+	float fUISaturation;
 
 	bool bVertexCache;
 	bool bTextureBackoffCache;
-	bool bTextureSecondaryCache;
 	bool bVertexDecoderJit;
 	bool bFullScreen;
 	bool bFullScreenMulti;
+	int iForceFullScreen = -1; // -1 = nope, 0 = force off, 1 = force on (not saved.)
 	int iInternalResolution;  // 0 = Auto (native), 1 = 1x (480x272), 2 = 2x, 3 = 3x, 4 = 4x and so on.
 	int iAnisotropyLevel;  // 0 - 5, powers of 2: 0 = 1x = no aniso
+	int iMultiSampleLevel;
 	int bHighQualityDepth;
 	bool bReplaceTextures;
 	bool bSaveNewTextures;
 	bool bIgnoreTextureFilenames;
-	bool bReplaceTexturesAllowLate;
 	int iTexScalingLevel; // 0 = auto, 1 = off, 2 = 2x, ..., 5 = 5x
 	int iTexScalingType; // 0 = xBRZ, 1 = Hybrid
 	bool bTexDeposterize;
 	bool bTexHardwareScaling;
 	int iFpsLimit1;
 	int iFpsLimit2;
+	int iAnalogFpsLimit;
+	int iAnalogFpsMode; // 0 = auto, 1 = single direction, 2 = mapped to opposite
 	int iMaxRecent;
 	int iCurrentStateSlot;
-	int iRewindFlipFrequency;
+	int iRewindSnapshotInterval;
 	bool bUISound;
 	bool bEnableStateUndo;
 	std::string sStateLoadUndoGame;
@@ -220,19 +236,22 @@ public:
 	float fCwCheatScrollPosition;
 	float fGameListScrollPosition;
 	int iBloomHack; //0 = off, 1 = safe, 2 = balanced, 3 = aggressive
-	bool bBlockTransferGPU;
-	bool bDisableSlowFramebufEffects;
-	bool bFragmentTestCache;
+	bool bSkipGPUReadbacks;
 	int iSplineBezierQuality; // 0 = low , 1 = Intermediate , 2 = High
 	bool bHardwareTessellation;
 	bool bShaderCache;  // Hidden ini-only setting, useful for debugging shader compile times.
 
 	std::vector<std::string> vPostShaderNames; // Off for chain end (only Off for no shader)
 	std::map<std::string, float> mPostShaderSetting;
+
+	// Note that this is separate from VR stereo, though it'll share some code paths.
+	bool bStereoRendering;
+	// There can only be one, unlike regular post shaders.
+	std::string sStereoToMonoShader;
+
 	bool bShaderChainRequires60FPS;
 	std::string sTextureShaderName;
 	bool bGfxDebugOutput;
-	bool bGfxDebugSplitSubmit;
 	int iInflightFrames;
 	bool bRenderDuplicateFrames;
 
@@ -248,65 +267,34 @@ public:
 
 	// UI
 	bool bShowDebuggerOnLoad;
-	int iShowFPSCounter;
+	int iShowStatusFlags;
 	bool bShowRegionOnGameIcon;
 	bool bShowIDOnGameIcon;
 	float fGameGridScale;
 	bool bShowOnScreenMessages;
 	int iBackgroundAnimation;  // enum BackgroundAnimation
+	bool bTransparentBackground;
 
-	// TODO: Maybe move to a separate theme system.
-	uint32_t uItemStyleFg;
-	uint32_t uItemStyleBg;
-	uint32_t uItemFocusedStyleFg;
-	uint32_t uItemFocusedStyleBg;
-	uint32_t uItemDownStyleFg;
-	uint32_t uItemDownStyleBg;
-	uint32_t uItemDisabledStyleFg;
-	uint32_t uItemDisabledStyleBg;
-	uint32_t uItemHighlightedStyleFg;
-	uint32_t uItemHighlightedStyleBg;
-
-	uint32_t uButtonStyleFg;
-	uint32_t uButtonStyleBg;
-	uint32_t uButtonFocusedStyleFg;
-	uint32_t uButtonFocusedStyleBg;
-	uint32_t uButtonDownStyleFg;
-	uint32_t uButtonDownStyleBg;
-	uint32_t uButtonDisabledStyleFg;
-	uint32_t uButtonDisabledStyleBg;
-	uint32_t uButtonHighlightedStyleFg;
-	uint32_t uButtonHighlightedStyleBg;
-
-	uint32_t uHeaderStyleFg;
-	uint32_t uInfoStyleFg;
-	uint32_t uInfoStyleBg;
-	uint32_t uPopupTitleStyleFg;
-	uint32_t uPopupStyleFg;
-	uint32_t uPopupStyleBg;
+	std::string sThemeName;
 
 	bool bLogFrameDrops;
 	bool bShowDebugStats;
 	bool bShowAudioDebug;
 	bool bShowGpuProfile;
 
-	//Analog stick tilting
-	//the base x and y tilt. this inclination is treated as (0,0) and the tilt input
-	//considers this orientation to be equal to no movement of the analog stick.
-	float fTiltBaseX, fTiltBaseY;
-	int iTiltOrientation;
-	//whether the x axes and y axes should invert directions (left becomes right, top becomes bottom.)
-	bool bInvertTiltX, bInvertTiltY;
-	//the sensitivity of the tilt in the x direction
+	// Analog stick tilting
+	// This is the held base angle (from the horizon), that we compute the tilt relative from.
+	float fTiltBaseAngleY;
+	// Inverts the direction of the x axes and y axes for the purposes of tilt input.
+	bool bInvertTiltX;
+	bool bInvertTiltY;
+	// The sensitivity of the tilt in the X and Y directions, separately.
 	int iTiltSensitivityX;
-	//the sensitivity of the tilt in the Y direction
 	int iTiltSensitivityY;
-	//the deadzone radius of the tilt
-	float fDeadzoneRadius;
-	// deadzone skip
-	float fTiltDeadzoneSkip;
-	//type of tilt input currently selected: Defined in TiltEventProcessor.h
-	//0 - no tilt, 1 - analog stick, 2 - D-Pad, 3 - Action Buttons (Tri, Cross, Square, Circle)
+	// The deadzone radius of the tilt. Only used in the analog mapping.
+	float fTiltAnalogDeadzoneRadius;
+	// Type of tilt input currently selected: Defined in TiltEventProcessor.h
+	// 0 - no tilt, 1 - analog stick, 2 - D-Pad, 3 - Action Buttons (Tri, Cross, Square, Circle)
 	int iTiltInputType;
 
 	// The three tabs.
@@ -424,9 +412,6 @@ public:
 
 	bool bSystemControls;
 
-	// Use the hardware scaler to scale up the image to save fillrate. Similar to Windows' window size, really.
-	int iAndroidHwScale;  // 0 = device resolution. 1 = 480x272 (extended to correct aspect), 2 = 960x544 etc.
-
 	// Risky JIT optimizations
 	bool bDiscardRegsOnJRRA;
 
@@ -470,6 +455,25 @@ public:
 	int iFirmwareVersion;
 	bool bBypassOSKWithKeyboard;
 
+	// Virtual reality
+	bool bEnableVR;
+	bool bEnable6DoF;
+	bool bEnableStereo;
+	bool bEnableMotions;
+	bool bForce72Hz;
+	bool bManualForceVR;
+	float fCameraDistance;
+	float fCameraHeight;
+	float fCameraSide;
+	float fCanvasDistance;
+	float fFieldOfViewPercentage;
+	float fHeadUpDisplayScale;
+	float fMotionLength;
+	float fHeadRotationScale;
+	bool bHeadRotationEnabled;
+	bool bHeadRotationSmoothing;
+	int iCameraPitch;
+
 	// Debugger
 	int iDisasmWindowX;
 	int iDisasmWindowY;
@@ -479,6 +483,9 @@ public:
 	int iGEWindowY;
 	int iGEWindowW;
 	int iGEWindowH;
+	uint32_t uGETabsLeft;
+	uint32_t uGETabsRight;
+	uint32_t uGETabsTopRight;
 	int iConsoleWindowX;
 	int iConsoleWindowY;
 	int iFontWidth;
@@ -495,6 +502,7 @@ public:
 
 	// Volatile development settings
 	bool bShowFrameProfiler;
+	bool bGpuLogProfiler; // Controls the Vulkan logging profiler (profiles textures uploads etc).
 
 	// Various directories. Autoconfigured, not read from ini.
 	Path currentDirectory;  // The directory selected in the game browsing window.
@@ -513,7 +521,7 @@ public:
 	void Load(const char *iniFileName = nullptr, const char *controllerIniFilename = nullptr);
 	bool Save(const char *saveReason);
 	void Reload();
-	void RestoreDefaults();
+	void RestoreDefaults(RestoreSettingsBits whatToRestore);
 
 	//per game config managment, should maybe be in it's own class
 	void changeGameSpecific(const std::string &gameId = "", const std::string &title = "");
@@ -546,19 +554,45 @@ public:
 	int NextValidBackend();
 	bool IsBackendEnabled(GPUBackend backend, bool validate = true);
 
+	bool UseFullScreen() const {
+		if (iForceFullScreen != -1)
+			return iForceFullScreen == 1;
+		return bFullScreen;
+	}
+
+	std::vector<std::string> RecentIsos() const;
+	bool HasRecentIsos() const;
+	void ClearRecentIsos();
+
+	const std::map<std::string, std::pair<std::string, int>> &GetLangValuesMapping();
+	bool LoadAppendedConfig();
+	void SetAppendedConfigIni(const Path &path);
+
+	void NotifyUpdatedCpuCore();
+
 protected:
 	void LoadStandardControllerIni();
+	void LoadLangValuesMapping();
+
+	void PostLoadCleanup(bool gameSpecific);
+	void PreSaveCleanup(bool gameSpecific);
+	void PostSaveCleanup(bool gameSpecific);
 
 private:
 	bool reload_ = false;
 	std::string gameId_;
 	std::string gameIdTitle_;
+	std::vector<std::string> recentIsos;
+	std::map<std::string, std::pair<std::string, int>> langValuesMapping_;
 	Path iniFilename_;
 	Path controllerIniFilename_;
 	Path searchPath_;
+	Path appendedConfigFileName_;
+	// A set make more sense, but won't have many entry, and I dont want to include the whole std::set header here
+	std::vector<std::string> appendedConfigUpdatedGames_;
+	ConfigPrivate *private_ = nullptr;
 };
 
-std::map<std::string, std::pair<std::string, int>> GetLangValuesMapping();
 std::string CreateRandMAC();
 
 // TODO: Find a better place for this.

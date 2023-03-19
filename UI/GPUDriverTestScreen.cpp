@@ -1,5 +1,6 @@
 #include "GPUDriverTestScreen.h"
 #include "Common/Data/Text/I18n.h"
+#include "Common/UI/UI.h"
 #include "Common/UI/View.h"
 #include "Common/GPU/Shader.h"
 #include "Common/GPU/ShaderWriter.h"
@@ -121,7 +122,7 @@ static const std::vector<Draw::ShaderSource> vsAdrenoLogicTest = {
 	"} myBufferVals;\n"
 	"layout (location = 0) in vec4 pos;\n"
 	"layout (location = 1) in vec4 inColor;\n"
-	"layout (location = 2) in vec2 inTexCoord;\n"
+	"layout (location = 3) in vec2 inTexCoord;\n"
 	"layout (location = 0) out vec4 outColor;\n"
 	"layout (location = 1) out highp vec2 outTexCoord;\n"
 	"out gl_PerVertex { vec4 gl_Position; };\n"
@@ -218,7 +219,7 @@ static const std::vector<Draw::ShaderSource> vsFlat = {
 	"} myBufferVals;\n"
 	"layout (location = 0) in vec4 pos;\n"
 	"layout (location = 1) in vec4 inColor;\n"
-	"layout (location = 2) in vec2 inTexCoord;\n"
+	"layout (location = 3) in vec2 inTexCoord;\n"
 	"layout (location = 0) flat out lowp vec4 outColor;\n"
 	"layout (location = 1) out highp vec2 outTexCoord;\n"
 	"out gl_PerVertex { vec4 gl_Position; };\n"
@@ -229,6 +230,8 @@ static const std::vector<Draw::ShaderSource> vsFlat = {
 	"}\n"
 	}
 };
+
+static_assert(Draw::SEM_TEXCOORD0 == 3, "Semantic shader hardcoded in glsl above.");
 
 GPUDriverTestScreen::GPUDriverTestScreen() {
 	using namespace Draw;
@@ -320,6 +323,7 @@ void GPUDriverTestScreen::DiscardTest() {
 
 		InputLayout *inputLayout = ui_draw2d.CreateInputLayout(draw);
 		BlendState *blendOff = draw->CreateBlendState({ false, 0xF });
+		BlendState *blendOffNoColor = draw->CreateBlendState({ false, 0x8 });
 
 		// Write depth, write stencil.
 		DepthStencilStateDesc dsDesc{};
@@ -327,13 +331,10 @@ void GPUDriverTestScreen::DiscardTest() {
 		dsDesc.depthWriteEnabled = true;
 		dsDesc.depthCompare = Comparison::ALWAYS;
 		dsDesc.stencilEnabled = true;
-		dsDesc.front.compareMask = 0xFF;
-		dsDesc.front.compareOp = Comparison::ALWAYS;
-		dsDesc.front.passOp = StencilOp::REPLACE;
-		dsDesc.front.failOp = StencilOp::ZERO;
-		dsDesc.front.depthFailOp = StencilOp::ZERO;
-		dsDesc.front.writeMask = 0xFF;
-		dsDesc.back = dsDesc.front;
+		dsDesc.stencil.compareOp = Comparison::ALWAYS;
+		dsDesc.stencil.passOp = StencilOp::REPLACE;
+		dsDesc.stencil.failOp = StencilOp::REPLACE;  // These two shouldn't matter, because the test that fails is discard, not stencil.
+		dsDesc.stencil.depthFailOp = StencilOp::REPLACE;
 		DepthStencilState *depthStencilWrite = draw->CreateDepthStencilState(dsDesc);
 
 		// Write only depth.
@@ -351,30 +352,27 @@ void GPUDriverTestScreen::DiscardTest() {
 		dsDesc.depthTestEnabled = true;
 		dsDesc.stencilEnabled = true;
 		dsDesc.depthCompare = Comparison::ALWAYS;
-		dsDesc.front.compareOp = Comparison::EQUAL;
-		dsDesc.back = dsDesc.front;
+		dsDesc.stencil.compareOp = Comparison::EQUAL;
+		dsDesc.stencil.failOp = StencilOp::KEEP;
+		dsDesc.stencil.depthFailOp = StencilOp::KEEP;
 		DepthStencilState *stencilEqualDepthAlways = draw->CreateDepthStencilState(dsDesc);
 
 		dsDesc.depthTestEnabled = false;
-		dsDesc.front.compareOp = Comparison::EQUAL;
-		dsDesc.back = dsDesc.front;
+		dsDesc.stencil.compareOp = Comparison::EQUAL;
 		DepthStencilState *stencilEqual = draw->CreateDepthStencilState(dsDesc);
 
 		dsDesc.depthTestEnabled = true;
 		dsDesc.depthCompare = Comparison::ALWAYS;
-		dsDesc.front.compareOp = Comparison::NOT_EQUAL;
-		dsDesc.back = dsDesc.front;
+		dsDesc.stencil.compareOp = Comparison::NOT_EQUAL;
 		DepthStencilState *stenciNotEqualDepthAlways = draw->CreateDepthStencilState(dsDesc);
 
 		dsDesc.depthTestEnabled = false;
-		dsDesc.front.compareOp = Comparison::NOT_EQUAL;
-		dsDesc.back = dsDesc.front;
+		dsDesc.stencil.compareOp = Comparison::NOT_EQUAL;
 		DepthStencilState *stencilNotEqual = draw->CreateDepthStencilState(dsDesc);
 
 		dsDesc.stencilEnabled = true;
 		dsDesc.depthTestEnabled = true;
-		dsDesc.front.compareOp = Comparison::ALWAYS;
-		dsDesc.back = dsDesc.front;
+		dsDesc.stencil.compareOp = Comparison::ALWAYS;
 		dsDesc.depthCompare = Comparison::LESS_EQUAL;
 		DepthStencilState *stencilAlwaysDepthTestLessEqual = draw->CreateDepthStencilState(dsDesc);
 		dsDesc.depthCompare = Comparison::GREATER;
@@ -392,41 +390,41 @@ void GPUDriverTestScreen::DiscardTest() {
 		PipelineDesc discardDesc{
 			Primitive::TRIANGLE_LIST,
 			{ draw->GetVshaderPreset(VS_TEXTURE_COLOR_2D), discardFragShader_ },
-			inputLayout, depthStencilWrite, blendOff, rasterNoCull, &vsColBufDesc,
+			inputLayout, depthStencilWrite, blendOffNoColor, rasterNoCull, &vsColBufDesc,
 		};
-		discardWriteDepthStencil_ = draw->CreateGraphicsPipeline(discardDesc);
+		discardWriteDepthStencil_ = draw->CreateGraphicsPipeline(discardDesc, "test");
 		discardDesc.depthStencil = depthWrite;
-		discardWriteDepth_ = draw->CreateGraphicsPipeline(discardDesc);
+		discardWriteDepth_ = draw->CreateGraphicsPipeline(discardDesc, "test");
 		discardDesc.depthStencil = stencilWrite;
-		discardWriteStencil_ = draw->CreateGraphicsPipeline(discardDesc);
+		discardWriteStencil_ = draw->CreateGraphicsPipeline(discardDesc, "test");
 
 		PipelineDesc testDesc{
 			Primitive::TRIANGLE_LIST,
 			{ draw->GetVshaderPreset(VS_TEXTURE_COLOR_2D), draw->GetFshaderPreset(FS_TEXTURE_COLOR_2D) },
 			inputLayout, stencilEqual, blendOff, rasterNoCull, &vsColBufDesc,
 		};
-		drawTestStencilEqual_ = draw->CreateGraphicsPipeline(testDesc);
+		drawTestStencilEqual_ = draw->CreateGraphicsPipeline(testDesc, "test");
 
 		testDesc.depthStencil = stencilEqualDepthAlways;
-		drawTestStencilEqualDepthAlways_ = draw->CreateGraphicsPipeline(testDesc);
+		drawTestStencilEqualDepthAlways_ = draw->CreateGraphicsPipeline(testDesc, "test");
 
 		testDesc.depthStencil = stencilNotEqual;
-		drawTestStencilNotEqual_ = draw->CreateGraphicsPipeline(testDesc);
+		drawTestStencilNotEqual_ = draw->CreateGraphicsPipeline(testDesc, "test");
 
 		testDesc.depthStencil = stenciNotEqualDepthAlways;
-		drawTestStencilNotEqualDepthAlways_ = draw->CreateGraphicsPipeline(testDesc);
+		drawTestStencilNotEqualDepthAlways_ = draw->CreateGraphicsPipeline(testDesc, "test");
 
 		testDesc.depthStencil = stencilAlwaysDepthTestGreater;
-		drawTestStencilAlwaysDepthGreater_ = draw->CreateGraphicsPipeline(testDesc);
+		drawTestStencilAlwaysDepthGreater_ = draw->CreateGraphicsPipeline(testDesc, "test");
 
 		testDesc.depthStencil = stencilAlwaysDepthTestLessEqual;
-		drawTestStencilAlwaysDepthLessEqual_ = draw->CreateGraphicsPipeline(testDesc);
+		drawTestStencilAlwaysDepthLessEqual_ = draw->CreateGraphicsPipeline(testDesc, "test");
 
 		testDesc.depthStencil = depthTestGreater;
-		drawTestDepthGreater_ = draw->CreateGraphicsPipeline(testDesc);
+		drawTestDepthGreater_ = draw->CreateGraphicsPipeline(testDesc, "test");
 
 		testDesc.depthStencil = depthTestLessEqual;
-		drawTestDepthLessEqual_ = draw->CreateGraphicsPipeline(testDesc);
+		drawTestDepthLessEqual_ = draw->CreateGraphicsPipeline(testDesc, "test");
 
 		inputLayout->Release();
 		blendOff->Release();
@@ -500,28 +498,29 @@ void GPUDriverTestScreen::DiscardTest() {
 			dc.Flush();
 
 			dc.BeginPipeline(writePipelines[j], samplerNearest_);
-			// Draw the rectangle with stencil value 0, depth 0.1f and the text with stencil 0xFF, depth 0.9. Then leave 0xFF as the stencil value and draw the rectangles at depth 0.5.
-			draw->SetStencilRef(0x0);
+			// Draw the rectangle with stencil value 0, depth 0.1f and the text with stencil 0xFF, depth 0.9. Then set 0xFF as the stencil value and draw the rectangles at depth 0.5.
+
+			draw->SetStencilParams(0, 0xFF, 0xFF);
 			dc.SetCurZ(0.1f);
 			dc.FillRect(UI::Drawable(bgColorBAD), bounds);
 			// test bounds
 			dc.Flush();
 
-			draw->SetStencilRef(0xff);
+			draw->SetStencilParams(0xff, 0xFF, 0xFF);
 			dc.SetCurZ(0.9f);
 			dc.DrawTextRect("TEST OK", bounds, textColorBAD, ALIGN_HCENTER | ALIGN_VCENTER | FLAG_DYNAMIC_ASCII);
 			dc.Flush();
 
 			// Draw rectangle that should result in the text
 			dc.BeginPipeline(testPipeline1[i], samplerNearest_);
-			draw->SetStencilRef(0xff);
+			draw->SetStencilParams(0xff, 0, 0xFF);
 			dc.SetCurZ(0.5f);
 			dc.FillRect(UI::Drawable(textColorOK), bounds);
 			dc.Flush();
 
 			// Draw rectangle that should result in the bg
 			dc.BeginPipeline(testPipeline2[i], samplerNearest_);
-			draw->SetStencilRef(0xff);
+			draw->SetStencilParams(0xff, 0, 0xFF);
 			dc.SetCurZ(0.5f);
 			dc.FillRect(UI::Drawable(bgColorOK), bounds);
 			dc.Flush();
@@ -560,14 +559,14 @@ void GPUDriverTestScreen::ShaderTest() {
 			{ adrenoLogicDiscardVertShader_, adrenoLogicDiscardFragShader_ },
 			inputLayout, depthStencilOff, blendOff, rasterNoCull, &vsColBufDesc,
 		};
-		adrenoLogicDiscardPipeline_ = draw->CreateGraphicsPipeline(adrenoLogicDiscardDesc);
+		adrenoLogicDiscardPipeline_ = draw->CreateGraphicsPipeline(adrenoLogicDiscardDesc, "test");
 
 		PipelineDesc flatDesc{
 			Primitive::TRIANGLE_LIST,
 			{ flatVertShader_, flatFragShader_ },
 			inputLayout, depthStencilOff, blendOff, rasterNoCull, &vsColBufDesc,
 		};
-		flatShadingPipeline_ = draw->CreateGraphicsPipeline(flatDesc);
+		flatShadingPipeline_ = draw->CreateGraphicsPipeline(flatDesc, "test");
 
 		inputLayout->Release();
 		blendOff->Release();

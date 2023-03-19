@@ -22,46 +22,31 @@
 
 #include "Common/File/Path.h"
 
-#include "GPU/GPUCommon.h"
+#include "GPU/GPUCommonHW.h"
+#include "GPU/Common/TextureShaderCommon.h"
 #include "GPU/GLES/FramebufferManagerGLES.h"
 #include "GPU/GLES/DrawEngineGLES.h"
-#include "GPU/GLES/DepalettizeShaderGLES.h"
 #include "GPU/GLES/FragmentTestCacheGLES.h"
 
 class ShaderManagerGLES;
 class TextureCacheGLES;
 class LinkedShader;
 
-class GPU_GLES : public GPUCommon {
+class GPU_GLES : public GPUCommonHW {
 public:
 	GPU_GLES(GraphicsContext *gfxCtx, Draw::DrawContext *draw);
 	~GPU_GLES();
 
 	// This gets called on startup and when we get back from settings.
-	void CheckGPUFeatures() override;
+	u32 CheckGPUFeatures() const override;
 
 	bool IsReady() override;
 	void CancelReady() override;
 
-	void PreExecuteOp(u32 op, u32 diff) override;
-	void ExecuteOp(u32 op, u32 diff) override;
-
-	void ReapplyGfxState() override;
-	void SetDisplayFramebuffer(u32 framebuf, u32 stride, GEBufferFormat format) override;
 	void GetStats(char *buffer, size_t bufsize) override;
 
-	void ClearCacheNextFrame() override;
 	void DeviceLost() override;  // Only happens on Android. Drop all textures and shaders.
-	void DeviceRestore() override;
-
-	void DoState(PointerWrap &p) override;
-
-	void ClearShaderCache() override;
-	void CleanupBeforeUI() override;
-
-	// Using string because it's generic - makes no assumptions on the size of the shader IDs of this backend.
-	std::vector<std::string> DebugGetShaderIDs(DebugShaderType shader) override;
-	std::string DebugGetShaderString(std::string id, DebugShaderType shader, DebugShaderStringType stringType) override;
+	void DeviceRestore(Draw::DrawContext *draw) override;
 
 	void BeginHostFrame() override;
 	void EndHostFrame() override;
@@ -70,20 +55,12 @@ protected:
 	void FinishDeferred() override;
 
 private:
-	void Flush() {
-		drawEngine_.Flush();
-	}
-	void CheckFlushOp(int cmd, u32 diff);
-	void BuildReportingInfo();
+	void BuildReportingInfo() override;
 
-	void InitClear() override;
 	void BeginFrame() override;
-	void CopyDisplayToOutput(bool reallyDirty) override;
-	void Reinitialize() override;
 
 	FramebufferManagerGLES *framebufferManagerGL_;
 	TextureCacheGLES *textureCacheGL_;
-	DepalShaderCacheGLES depalShaderCache_;
 	DrawEngineGLES drawEngine_;
 	FragmentTestCacheGLES fragmentTestCache_;
 	ShaderManagerGLES *shaderManagerGL_;

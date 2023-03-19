@@ -7,12 +7,15 @@
 #include <set>
 #include <string>
 #include <mutex>
+#include <queue>
 #include <condition_variable>
 
-#include "Common/GPU/OpenGL/GLCommon.h"
+#include "Common/GPU/MiscTypes.h"
 #include "Common/Data/Convert/SmallDataConvert.h"
 #include "Common/Log.h"
-#include "GLQueueRunner.h"
+#include "Common/GPU/OpenGL/GLQueueRunner.h"
+#include "Common/GPU/OpenGL/GLFrameData.h"
+#include "Common/GPU/OpenGL/GLCommon.h"
 
 class GLRInputLayout;
 class GLPushBuffer;
@@ -25,12 +28,13 @@ constexpr int MAX_GL_TEXTURE_SLOTS = 8;
 
 class GLRTexture {
 public:
-	GLRTexture(int width, int height, int numMips);
+	GLRTexture(const Draw::DeviceCaps &caps, int width, int height, int depth, int numMips);
 	~GLRTexture();
 
 	GLuint texture = 0;
 	uint16_t w;
 	uint16_t h;
+	uint16_t d;
 
 	// We don't trust OpenGL defaults - setting wildly off values ensures that we'll end up overwriting these parameters.
 	GLenum target = 0xFFFF;
@@ -48,14 +52,12 @@ public:
 
 class GLRFramebuffer {
 public:
-	GLRFramebuffer(int _width, int _height, bool z_stencil)
-		: color_texture(_width, _height, 1), z_stencil_texture(_width, _height, 1),
+	GLRFramebuffer(const Draw::DeviceCaps &caps, int _width, int _height, bool z_stencil)
+		: color_texture(caps, _width, _height, 1, 1), z_stencil_texture(caps, _width, _height, 1, 1),
 		width(_width), height(_height), z_stencil_(z_stencil) {
 	}
 
 	~GLRFramebuffer();
-
-	int numShadows = 1;  // TODO: Support this.
 
 	GLuint handle = 0;
 	GLRTexture color_texture;
@@ -92,11 +94,32 @@ public:
 	std::string error;
 };
 
+struct GLRProgramFlags {
+	bool supportDualSource : 1;
+	bool useClipDistance0 : 1;
+	bool useClipDistance1 : 1;
+	bool useClipDistance2 : 1;
+};
+
+// Unless you manage lifetimes in some smart way,
+// your loc data for uniforms and samplers need to be in a struct
+// derived from this, and passed into CreateProgram.
+class GLRProgramLocData {
+public:
+	virtual ~GLRProgramLocData() {}
+};
+
 class GLRProgram {
 public:
 	~GLRProgram() {
+		if (deleteCallback_) {
+			deleteCallback_(deleteParam_);
+		}
 		if (program) {
 			glDeleteProgram(program);
+		}
+		if (locData_) {
+			delete locData_;
 		}
 	}
 	struct Semantic {
@@ -107,6 +130,7 @@ public:
 	struct UniformLocQuery {
 		GLint *dest;
 		const char *name;
+		bool required;
 	};
 
 	struct Initializer {
@@ -119,7 +143,9 @@ public:
 	std::vector<Semantic> semantics_;
 	std::vector<UniformLocQuery> queries_;
 	std::vector<Initializer> initialize_;
-	bool use_clip_distance0 = false;
+
+	GLRProgramLocData *locData_;
+	bool use_clip_distance[8]{};
 
 	struct UniformInfo {
 		int loc_;
@@ -140,6 +166,16 @@ public:
 		}
 		return loc;
 	}
+
+	void SetDeleteCallback(void(*cb)(void *), void *p) {
+		deleteCallback_ = cb;
+		deleteParam_ = p;
+	}
+
+private:
+	void(*deleteCallback_)(void *) = nullptr;
+	void *deleteParam_ = nullptr;
+
 	std::unordered_map<std::string, UniformInfo> uniformCache_;
 };
 
@@ -315,30 +351,6 @@ private:
 	GLBufferStrategy strategy_ = GLBufferStrategy::SUBDATA;
 };
 
-enum class GLRRunType {
-	END,
-	SYNC,
-};
-
-class GLDeleter {
-public:
-	void Perform(GLRenderManager *renderManager, bool skipGLCalls);
-
-	bool IsEmpty() const {
-		return shaders.empty() && programs.empty() && buffers.empty() && textures.empty() && inputLayouts.empty() && framebuffers.empty() && pushBuffers.empty();
-	}
-
-	void Take(GLDeleter &other);
-
-	std::vector<GLRShader *> shaders;
-	std::vector<GLRProgram *> programs;
-	std::vector<GLRBuffer *> buffers;
-	std::vector<GLRTexture *> textures;
-	std::vector<GLRInputLayout *> inputLayouts;
-	std::vector<GLRFramebuffer *> framebuffers;
-	std::vector<GLPushBuffer *> pushBuffers;
-};
-
 class GLRInputLayout {
 public:
 	struct Entry {
@@ -353,40 +365,62 @@ public:
 	int semanticsMask_ = 0;
 };
 
+enum class GLRRunType {
+	PRESENT,
+	SYNC,
+	EXIT,
+};
+
+class GLRenderManager;
+class GLPushBuffer;
+
+// These are enqueued from the main thread,
+// and the render thread pops them off
+struct GLRRenderThreadTask {
+	std::vector<GLRStep *> steps;
+	std::vector<GLRInitStep> initSteps;
+
+	int frame;
+	GLRRunType runType;
+};
+
 // Note: The GLRenderManager is created and destroyed on the render thread, and the latter
 // happens after the emu thread has been destroyed. Therefore, it's safe to run wild deleting stuff
 // directly in the destructor.
 class GLRenderManager {
 public:
-	GLRenderManager();
+	GLRenderManager() {}
 	~GLRenderManager();
 
-	void SetErrorCallback(ErrorCallbackFn callback, void *userdata) {
-		queueRunner_.SetErrorCallback(callback, userdata);
+
+	void SetInvalidationCallback(InvalidationCallback callback) {
+		invalidationCallback_ = callback;
 	}
 
 	void ThreadStart(Draw::DrawContext *draw);
 	void ThreadEnd();
-	bool ThreadFrame();  // Returns false to request exiting the loop.
+	bool ThreadFrame();  // Returns true if it did anything. False means the queue was empty.
+
+	void SetErrorCallback(ErrorCallbackFn callback, void *userdata) {
+		queueRunner_.SetErrorCallback(callback, userdata);
+	}
+	void SetDeviceCaps(const Draw::DeviceCaps &caps) {
+		queueRunner_.SetDeviceCaps(caps);
+		caps_ = caps;
+	}
 
 	// Makes sure that the GPU has caught up enough that we can start writing buffers of this frame again.
 	void BeginFrame();
 	// Can run on a different thread!
-	void Finish();
-	void Run(int frame);
-
-	// Zaps queued up commands. Use if you know there's a risk you've queued up stuff that has already been deleted. Can happen during in-game shutdown.
-	void Wipe();
-
-	// Wait until no frames are pending.  Use during shutdown before freeing pointers.
-	void WaitUntilQueueIdle();
+	void Finish(); 
+	bool Run(GLRRenderThreadTask &task);
 
 	// Creation commands. These were not needed in Vulkan since there we can do that on the main thread.
 	// We pass in width/height here even though it's not strictly needed until we support glTextureStorage
 	// and then we'll also need formats and stuff.
-	GLRTexture *CreateTexture(GLenum target, int width, int height, int numMips) {
-		GLRInitStep step{ GLRInitStepType::CREATE_TEXTURE };
-		step.create_texture.texture = new GLRTexture(width, height, numMips);
+	GLRTexture *CreateTexture(GLenum target, int width, int height, int depth, int numMips) {
+		GLRInitStep step { GLRInitStepType::CREATE_TEXTURE };
+		step.create_texture.texture = new GLRTexture(caps_, width, height, depth, numMips);
 		step.create_texture.texture->target = target;
 		initSteps_.push_back(step);
 		return step.create_texture.texture;
@@ -414,7 +448,7 @@ public:
 
 	GLRFramebuffer *CreateFramebuffer(int width, int height, bool z_stencil) {
 		GLRInitStep step{ GLRInitStepType::CREATE_FRAMEBUFFER };
-		step.create_framebuffer.framebuffer = new GLRFramebuffer(width, height, z_stencil);
+		step.create_framebuffer.framebuffer = new GLRFramebuffer(caps_, width, height, z_stencil);
 		initSteps_.push_back(step);
 		return step.create_framebuffer.framebuffer;
 	}
@@ -423,15 +457,18 @@ public:
 	// not be an active render pass.
 	GLRProgram *CreateProgram(
 		std::vector<GLRShader *> shaders, std::vector<GLRProgram::Semantic> semantics, std::vector<GLRProgram::UniformLocQuery> queries,
-		std::vector<GLRProgram::Initializer> initalizers, bool supportDualSource, bool useClipDistance0) {
+		std::vector<GLRProgram::Initializer> initializers, GLRProgramLocData *locData, const GLRProgramFlags &flags) {
 		GLRInitStep step{ GLRInitStepType::CREATE_PROGRAM };
 		_assert_(shaders.size() <= ARRAY_SIZE(step.create_program.shaders));
 		step.create_program.program = new GLRProgram();
 		step.create_program.program->semantics_ = semantics;
 		step.create_program.program->queries_ = queries;
-		step.create_program.program->initialize_ = initalizers;
-		step.create_program.program->use_clip_distance0 = useClipDistance0;
-		step.create_program.support_dual_source = supportDualSource;
+		step.create_program.program->initialize_ = initializers;
+		step.create_program.program->locData_ = locData;
+		step.create_program.program->use_clip_distance[0] = flags.useClipDistance0;
+		step.create_program.program->use_clip_distance[1] = flags.useClipDistance1;
+		step.create_program.program->use_clip_distance[2] = flags.useClipDistance2;
+		step.create_program.support_dual_source = flags.supportDualSource;
 		_assert_msg_(shaders.size() > 0, "Can't create a program with zero shaders");
 		for (size_t i = 0; i < shaders.size(); i++) {
 			step.create_program.shaders[i] = shaders[i];
@@ -449,7 +486,7 @@ public:
 		return step.create_program.program;
 	}
 
-	GLRInputLayout *CreateInputLayout(std::vector<GLRInputLayout::Entry> &entries) {
+	GLRInputLayout *CreateInputLayout(const std::vector<GLRInputLayout::Entry> &entries) {
 		GLRInitStep step{ GLRInitStepType::CREATE_INPUT_LAYOUT };
 		step.create_input_layout.inputLayout = new GLRInputLayout();
 		step.create_input_layout.inputLayout->entries = entries;
@@ -513,9 +550,9 @@ public:
 	void BindFramebufferAsRenderTarget(GLRFramebuffer *fb, GLRRenderPassAction color, GLRRenderPassAction depth, GLRRenderPassAction stencil, uint32_t clearColor, float clearDepth, uint8_t clearStencil, const char *tag);
 
 	// Binds a framebuffer as a texture, for the following draws.
-	void BindFramebufferAsTexture(GLRFramebuffer *fb, int binding, int aspectBit, int attachment);
+	void BindFramebufferAsTexture(GLRFramebuffer *fb, int binding, int aspectBit);
 
-	bool CopyFramebufferToMemorySync(GLRFramebuffer *src, int aspectBits, int x, int y, int w, int h, Draw::DataFormat destFormat, uint8_t *pixels, int pixelStride, const char *tag);
+	bool CopyFramebufferToMemory(GLRFramebuffer *src, int aspectBits, int x, int y, int w, int h, Draw::DataFormat destFormat, uint8_t *pixels, int pixelStride, Draw::ReadbackMode mode, const char *tag);
 	void CopyImageToMemorySync(GLRTexture *texture, int mipLevel, int x, int y, int w, int h, Draw::DataFormat destFormat, uint8_t *pixels, int pixelStride, const char *tag);
 
 	void CopyFramebuffer(GLRFramebuffer *src, GLRect2D srcRect, GLRFramebuffer *dst, GLOffset2D dstPos, int aspectMask, const char *tag);
@@ -537,7 +574,7 @@ public:
 	}
 
 	// Takes ownership over the data pointer and delete[]-s it.
-	void TextureImage(GLRTexture *texture, int level, int width, int height, Draw::DataFormat format, uint8_t *data, GLRAllocType allocType = GLRAllocType::NEW, bool linearFilter = false) {
+	void TextureImage(GLRTexture *texture, int level, int width, int height, int depth, Draw::DataFormat format, uint8_t *data, GLRAllocType allocType = GLRAllocType::NEW, bool linearFilter = false) {
 		GLRInitStep step{ GLRInitStepType::TEXTURE_IMAGE };
 		step.texture_image.texture = texture;
 		step.texture_image.data = data;
@@ -545,12 +582,13 @@ public:
 		step.texture_image.level = level;
 		step.texture_image.width = width;
 		step.texture_image.height = height;
+		step.texture_image.depth = depth;
 		step.texture_image.allocType = allocType;
 		step.texture_image.linearFilter = linearFilter;
 		initSteps_.push_back(step);
 	}
 
-	void TextureSubImage(GLRTexture *texture, int level, int x, int y, int width, int height, Draw::DataFormat format, uint8_t *data, GLRAllocType allocType = GLRAllocType::NEW) {
+	void TextureSubImage(int slot, GLRTexture *texture, int level, int x, int y, int width, int height, Draw::DataFormat format, uint8_t *data, GLRAllocType allocType = GLRAllocType::NEW) {
 		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
 		GLRRenderData _data{ GLRRenderCommand::TEXTURE_SUBIMAGE };
 		_data.texture_subimage.texture = texture;
@@ -562,13 +600,14 @@ public:
 		_data.texture_subimage.width = width;
 		_data.texture_subimage.height = height;
 		_data.texture_subimage.allocType = allocType;
+		_data.texture_subimage.slot = slot;
 		curRenderStep_->commands.push_back(_data);
 	}
 
-	void FinalizeTexture(GLRTexture *texture, int maxLevels, bool genMips) {
+	void FinalizeTexture(GLRTexture *texture, int loadedLevels, bool genMips) {
 		GLRInitStep step{ GLRInitStepType::TEXTURE_FINALIZE };
 		step.texture_finalize.texture = texture;
-		step.texture_finalize.maxLevel = maxLevels;
+		step.texture_finalize.loadedLevels = loadedLevels;
 		step.texture_finalize.genMips = genMips;
 		initSteps_.push_back(step);
 	}
@@ -737,6 +776,19 @@ public:
 		curRenderStep_->commands.push_back(data);
 	}
 
+	void SetUniformM4x4Stereo(const char *name, const GLint *loc, const float *left, const float *right) {
+		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+#ifdef _DEBUG
+		_dbg_assert_(curProgram_);
+#endif
+		GLRRenderData data{ GLRRenderCommand::UNIFORMSTEREOMATRIX };
+		data.uniformMatrix4.name = name;
+		data.uniformMatrix4.loc = loc;
+		memcpy(&data.uniformMatrix4.m[0], left, sizeof(float) * 16);
+		memcpy(&data.uniformMatrix4.m[16], right, sizeof(float) * 16);
+		curRenderStep_->commands.push_back(data);
+	}
+
 	void SetUniformM4x4(const char *name, const float *udata) {
 		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
 #ifdef _DEBUG
@@ -749,7 +801,9 @@ public:
 	}
 
 	void SetBlendAndMask(int colorMask, bool blendEnabled, GLenum srcColor, GLenum dstColor, GLenum srcAlpha, GLenum dstAlpha, GLenum funcColor, GLenum funcAlpha) {
-		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+		// Make this one only a non-debug _assert_, since it often comes first.
+		// Lets us collect info about this potential crash through assert extra data.
+		_assert_(curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
 		GLRRenderData data{ GLRRenderCommand::BLEND };
 		data.blend.mask = colorMask;
 		data.blend.enabled = blendEnabled;
@@ -869,13 +923,6 @@ public:
 		curRenderStep_->commands.push_back(data);
 	}
 
-	void Invalidate(int invalidateMask) {
-		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
-		GLRRenderData data{ GLRRenderCommand::INVALIDATE };
-		data.clear.clearMask = invalidateMask;
-		curRenderStep_->commands.push_back(data);
-	}
-
 	void Draw(GLenum mode, int first, int count) {
 		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
 		GLRRenderData data{ GLRRenderCommand::DRAW };
@@ -927,8 +974,9 @@ public:
 		_dbg_assert_(foundCount == 1);
 	}
 
-	void SetSwapFunction(std::function<void()> swapFunction) {
+	void SetSwapFunction(std::function<void()> swapFunction, bool retainControl) {
 		swapFunction_ = swapFunction;
+		retainControl_ = retainControl;
 	}
 
 	void SetSwapIntervalFunction(std::function<void(int)> swapIntervalFunction) {
@@ -959,20 +1007,9 @@ public:
 		skipGLCalls_ = true;
 	}
 
-	// Gets a frame-unique ID of the current step being recorded. Can be used to figure out
-	// when the current step has changed, which means the caller will need to re-record its state.
-	int GetCurrentStepId() const {
-		return renderStepOffset_ + (int)steps_.size();
-	}
-
 private:
-	void BeginSubmitFrame(int frame);
-	void EndSubmitFrame(int frame);
-	void Submit(int frame, bool triggerFence);
-
 	// Bad for performance but sometimes necessary for synchronous CPU readbacks (screenshots and whatnot).
 	void FlushSync();
-	void EndSyncFrame(int frame);
 
 	// When using legacy functionality for push buffers (glBufferData), we need to flush them
 	// before actually making the glDraw* calls. It's best if the render manager handles that.
@@ -980,55 +1017,34 @@ private:
 		frameData_[frame].activePushBuffers.insert(buffer);
 	}
 
-	// Per-frame data, round-robin so we can overlap submission with execution of the previous frame.
-	struct FrameData {
-		std::mutex push_mutex;
-		std::condition_variable push_condVar;
-
-		std::mutex pull_mutex;
-		std::condition_variable pull_condVar;
-
-		bool readyForFence = true;
-		bool readyForRun = false;
-		bool readyForSubmit = false;
-		bool skipSwap = false;
-		GLRRunType type = GLRRunType::END;
-
-		// GLuint fence; For future AZDO stuff?
-		std::vector<GLRStep *> steps;
-		std::vector<GLRInitStep> initSteps;
-
-		// Swapchain.
-		bool hasBegun = false;
-		uint32_t curSwapchainImage = -1;
-
-		GLDeleter deleter;
-		GLDeleter deleter_prev;
-		std::set<GLPushBuffer *> activePushBuffers;
-	};
-
-	FrameData frameData_[MAX_INFLIGHT_FRAMES];
+	GLFrameData frameData_[MAX_INFLIGHT_FRAMES];
 
 	// Submission time state
 	bool insideFrame_ = false;
-	// This is the offset within this frame, in case of a mid-frame sync.
-	int renderStepOffset_ = 0;
+
 	GLRStep *curRenderStep_ = nullptr;
 	std::vector<GLRStep *> steps_;
 	std::vector<GLRInitStep> initSteps_;
 
 	// Execution time state
 	bool run_ = true;
+
 	// Thread is managed elsewhere, and should call ThreadFrame.
-	std::mutex mutex_;
-	int threadInitFrame_ = 0;
 	GLQueueRunner queueRunner_;
 
-	// Thread state
-	int threadFrame_ = -1;
+	// For pushing data on the queue.
+	std::mutex pushMutex_;
+	std::condition_variable pushCondVar_;
 
-	bool nextFrame = false;
-	bool firstFrame = true;
+	std::queue<GLRRenderThreadTask> renderThreadQueue_;
+
+	// For readbacks and other reasons we need to sync with the render thread.
+	std::mutex syncMutex_;
+	std::condition_variable syncCondVar_;
+
+	bool firstFrame_ = true;
+	bool vrRenderStarted_ = false;
+	bool syncDone_ = false;
 
 	GLDeleter deleter_;
 	bool skipGLCalls_ = false;
@@ -1037,6 +1053,7 @@ private:
 
 	std::function<void()> swapFunction_;
 	std::function<void(int)> swapIntervalFunction_;
+	bool retainControl_ = false;
 	GLBufferStrategy bufferStrategy_ = GLBufferStrategy::SUBDATA;
 
 	int inflightFrames_ = MAX_INFLIGHT_FRAMES;
@@ -1051,4 +1068,7 @@ private:
 #ifdef _DEBUG
 	GLRProgram *curProgram_ = nullptr;
 #endif
+	Draw::DeviceCaps caps_{};
+
+	InvalidationCallback invalidationCallback_;
 };

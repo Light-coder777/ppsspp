@@ -20,9 +20,12 @@
 #include "CommonTypes.h"
 #include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/Common/GPUDebugInterface.h"
+#include "GPU/Software/SoftGpu.h"
 #include "GPU/Math3D.h"
 
 using namespace Math3D;
+
+static constexpr int32_t SCREEN_SCALE_FACTOR = 16;
 
 typedef u16 u10; // TODO: erm... :/
 
@@ -31,7 +34,14 @@ typedef Vec3<float> WorldCoords;
 typedef Vec3<float> ViewCoords;
 typedef Vec4<float> ClipCoords; // Range: -w <= x/y/z <= w
 
-struct SplinePatch;
+class BinManager;
+struct TransformState;
+
+enum class CullType {
+	CW = 0,
+	CCW = 1,
+	OFF = 2,
+};
 
 struct ScreenCoords
 {
@@ -60,81 +70,102 @@ struct ScreenCoords
 	}
 };
 
-struct DrawingCoords
-{
+struct DrawingCoords {
 	DrawingCoords() {}
-	DrawingCoords(s16 x, s16 y, u16 z) : x(x), y(y), z(z) {}
+	DrawingCoords(s16 x, s16 y) : x(x), y(y) {}
 
 	s16 x;
 	s16 y;
-	u16 z;
-
-	Vec2<s16> xy() const { return Vec2<s16>(x, y); }
-
-	DrawingCoords operator * (const float t) const
-	{
-		return DrawingCoords((s16)(x * t), (s16)(y * t), (u16)(z * t));
-	}
-
-	DrawingCoords operator + (const DrawingCoords& oth) const
-	{
-		return DrawingCoords(x + oth.x, y + oth.y, z + oth.z);
-	}
 };
 
-struct VertexData
-{
-	void Lerp(float t, const VertexData& a, const VertexData& b)
-	{
-		// World coords only needed for lighting, so we don't Lerp those
+struct alignas(16) VertexData {
+	Vec3Packedf texturecoords;
+	float clipw;
+	uint32_t color0;
+	uint32_t color1;
+	ScreenCoords screenpos;
+	float fogdepth;
+};
 
-		modelpos = ::Lerp(a.modelpos, b.modelpos, t);
+struct ClipVertexData {
+	void Lerp(float t, const ClipVertexData &a, const ClipVertexData &b) {
 		clippos = ::Lerp(a.clippos, b.clippos, t);
-		screenpos = ::Lerp(a.screenpos, b.screenpos, t);  // TODO: Should use a LerpInt (?)
-		texturecoords = ::Lerp(a.texturecoords, b.texturecoords, t);
-		normal = ::Lerp(a.normal, b.normal, t);
-		fogdepth = ::Lerp(a.fogdepth, b.fogdepth, t);
+		// Ignore screenpos because Lerp() is only used pre-calculation of screenpos.
+		v.texturecoords = ::Lerp(a.v.texturecoords, b.v.texturecoords, t);
+		v.fogdepth = ::Lerp(a.v.fogdepth, b.v.fogdepth, t);
 
-		u16 t_int = (u16)(t*256);
-		color0 = LerpInt<Vec4<int>,256>(a.color0, b.color0, t_int);
-		color1 = LerpInt<Vec3<int>,256>(a.color1, b.color1, t_int);
+		u16 t_int = (u16)(t * 256);
+		v.color0 = LerpInt<Vec4<int>, 256>(Vec4<int>::FromRGBA(a.v.color0), Vec4<int>::FromRGBA(b.v.color0), t_int).ToRGBA();
+		v.color1 = LerpInt<Vec3<int>, 256>(Vec3<int>::FromRGB(a.v.color1), Vec3<int>::FromRGB(b.v.color1), t_int).ToRGB();
 	}
 
-	ModelCoords modelpos;
-	WorldCoords worldpos; // TODO: Storing this is dumb, should transform the light to clip space instead
+	bool OutsideRange() const {
+		return v.screenpos.x == 0x7FFFFFFF;
+	}
+
 	ClipCoords clippos;
-	ScreenCoords screenpos; // TODO: Shouldn't store this ?
-	Vec2<float> texturecoords;
-	Vec3<float> normal;
-	WorldCoords worldnormal;
-	Vec4<int> color0;
-	Vec3<int> color1;
-	float fogdepth;
+	VertexData v;
 };
 
 class VertexReader;
 
 class SoftwareDrawEngine;
+class SoftwareVertexReader;
 
 class TransformUnit {
 public:
 	TransformUnit();
 	~TransformUnit();
 
+	bool IsStarted();
+
 	static WorldCoords ModelToWorldNormal(const ModelCoords& coords);
 	static WorldCoords ModelToWorld(const ModelCoords& coords);
 	static ViewCoords WorldToView(const WorldCoords& coords);
 	static ClipCoords ViewToClip(const ViewCoords& coords);
-	static ScreenCoords ClipToScreen(const ClipCoords& coords);
-	static DrawingCoords ScreenToDrawing(const ScreenCoords& coords);
-	static ScreenCoords DrawingToScreen(const DrawingCoords& coords);
+	static ScreenCoords ClipToScreen(const ClipCoords &coords, bool *outsideRangeFlag);
+	static inline DrawingCoords ScreenToDrawing(int x, int y) {
+		DrawingCoords ret;
+		// When offset > coord, this is negative and force-scissors.
+		ret.x = x / SCREEN_SCALE_FACTOR;
+		ret.y = y / SCREEN_SCALE_FACTOR;
+		return ret;
+	}
+	static inline DrawingCoords ScreenToDrawing(const ScreenCoords &coords) {
+		return ScreenToDrawing(coords.x, coords.y);
+	}
+	static ScreenCoords DrawingToScreen(const DrawingCoords &coords, u16 z);
 
-	void SubmitPrimitive(void* vertices, void* indices, GEPrimitiveType prim_type, int vertex_count, u32 vertex_type, int *bytesRead, SoftwareDrawEngine *drawEngine);
+	void SubmitPrimitive(const void* vertices, const void* indices, GEPrimitiveType prim_type, int vertex_count, u32 vertex_type, int *bytesRead, SoftwareDrawEngine *drawEngine);
+	void SubmitImmVertex(const ClipVertexData &vert, SoftwareDrawEngine *drawEngine);
 
 	bool GetCurrentSimpleVertices(int count, std::vector<GPUDebugVertex> &vertices, std::vector<u16> &indices);
-	VertexData ReadVertex(VertexReader &vreader, bool &outside_range_flag);
 
-	u8 *decoded_;
+	void Flush(const char *reason);
+	void FlushIfOverlap(const char *reason, bool modifying, uint32_t addr, uint32_t stride, uint32_t w, uint32_t h);
+	void NotifyClutUpdate(const void *src);
+
+	void GetStats(char *buffer, size_t bufsize);
+
+	void SetDirty(SoftDirty flags);
+	SoftDirty GetDirty();
+
+private:
+	ClipVertexData ReadVertex(const VertexReader &vreader, const TransformState &state);
+	void SendTriangle(CullType cullType, const ClipVertexData *verts, int provoking = 2);
+
+	u8 *decoded_ = nullptr;
+	BinManager *binner_ = nullptr;
+
+	// Normally max verts per prim is 3, but we temporarily need 4 to detect rectangles from strips.
+	ClipVertexData data_[4];
+	// This is the index of the next vert in data (or higher, may need modulus.)
+	int data_index_ = 0;
+	GEPrimitiveType prev_prim_ = GE_PRIM_POINTS;
+	bool hasDraws_ = false;
+	bool isImmDraw_ = false;
+
+	friend SoftwareVertexReader;
 };
 
 class SoftwareDrawEngine : public DrawEngineCommon {
@@ -142,12 +173,27 @@ public:
 	SoftwareDrawEngine();
 	~SoftwareDrawEngine();
 
+	void DeviceLost() override {}
+	void DeviceRestore(Draw::DrawContext *draw) override {}
+
+	void NotifyConfigChanged() override;
 	void DispatchFlush() override;
-	void DispatchSubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int cullMode, int *bytesRead) override;
+	void DispatchSubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int cullMode, int *bytesRead) override;
+	void DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex *buffer, int vertexCount, int cullMode, bool continuation) override;
 
 	VertexDecoder *FindVertexDecoder(u32 vtype);
 
 	TransformUnit transformUnit;
+
+#if PPSSPP_ARCH(32BIT)
+#undef new
+	void *operator new(size_t s) {
+		return AllocateAlignedMemory(s, 16);
+	}
+	void operator delete(void *p) {
+		FreeAlignedMemory(p);
+	}
+#endif
 
 protected:
 	bool UpdateUseHWTessellation(bool enable) override { return false; }

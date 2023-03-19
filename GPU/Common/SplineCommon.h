@@ -63,7 +63,7 @@ struct SurfaceInfo {
 	GEPatchPrimType primType;
 	bool patchFacing;
 
-	void Init() {
+	void BaseInit() {
 		// If specified as 0, uses 1.
 		if (tess_u < 1) tess_u = 1;
 		if (tess_v < 1) tess_v = 1;
@@ -88,7 +88,7 @@ struct BezierSurface : public SurfaceInfo {
 	int num_verts_per_patch;
 
 	void Init(int maxVertices) {
-		SurfaceInfo::Init();
+		SurfaceInfo::BaseInit();
 		// Downsample until it fits, in case crazy tessellation factors are sent.
 		while ((tess_u + 1) * (tess_v + 1) * num_patches_u * num_patches_v > maxVertices) {
 			tess_u--;
@@ -126,7 +126,7 @@ struct SplineSurface : public SurfaceInfo {
 	int num_vertices_u;
 
 	void Init(int maxVertices) {
-		SurfaceInfo::Init();
+		SurfaceInfo::BaseInit();
 		// Downsample until it fits, in case crazy tessellation factors are sent.
 		while ((num_patches_u * tess_u + 1) * (num_patches_v * tess_v + 1) > maxVertices) {
 			tess_u--;
@@ -186,14 +186,17 @@ struct Weight2D {
 };
 
 struct ControlPoints {
-	Vec3f *pos;
-	Vec2f *tex;
-	Vec4f *col;
+	Vec3f *pos = nullptr;
+	Vec2f *tex = nullptr;
+	Vec4f *col = nullptr;
 	u32_le defcolor;
 
 	ControlPoints() {}
 	ControlPoints(const SimpleVertex *const *points, int size, SimpleBufferManager &managedBuf);
 	void Convert(const SimpleVertex *const *points, int size);
+	bool IsValid() const {
+		return pos && tex && col;
+	}
 };
 
 struct OutputBuffers {

@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
 	xmlns:tools="http://schemas.android.com/tools"
-    package="org.ppsspp.ppsspp"
     android:installLocation="auto"
-    android:versionCode="112030000"
-    android:versionName="1.12.3.0">
+    android:versionCode="114040000"
+    android:versionName="1.14.4.0">
     <!-- Note that versionCode should be in the format xyyzzrrrr. Example: 110030000 -->
     <!-- In this same case, versionName should be 1.10.3.0 -->
     <!-- Also note that we are overriding these values anyway from gradle. -->
@@ -43,7 +42,7 @@
 
     <application
         android:allowBackup="true"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name" 
         android:logo="@drawable/ic_banner"
         android:isGame="true"
@@ -70,37 +69,28 @@
 				
 				<category android:name="android.intent.category.DEFAULT" />
 				<category android:name="android.intent.category.BROWSABLE" />
-				
-				<data
-					android:host="*"
-					android:mimeType="*/*"
-					android:pathPattern=".*\\.iso"
-					android:scheme="file" />
-				<data
-					android:host="*"
-					android:mimeType="*/*"
-					android:pathPattern=".*\\.cso"
-					android:scheme="file" />
-				<data
-					android:host="*"
-					android:mimeType="*/*"
-					android:pathPattern=".*\\.elf"
-					android:scheme="file" />
-				<data
-					android:host="*"
-					android:mimeType="*/*"
-					android:pathPattern=".*\\.ISO"
-					android:scheme="file" />
-				<data
-					android:host="*"
-					android:mimeType="*/*"
-					android:pathPattern=".*\\.CSO"
-					android:scheme="file" />
-				<data
-					android:host="*"
-					android:mimeType="*/*"
-					android:pathPattern=".*\\.ELF"
-					android:scheme="file" />
+
+				<data android:scheme="file" />
+				<data android:mimeType="*/*" />
+				<data android:host="*" />
+				<data android:pathPattern=".*\\.iso" />
+				<data android:pathPattern=".*\\..*\\.iso" />
+				<data android:pathPattern=".*\\..*\\..*\\.iso" />
+				<data android:pathPattern=".*\\.cso" />
+				<data android:pathPattern=".*\\..*\\.cso" />
+				<data android:pathPattern=".*\\..*\\..*\\.cso" />
+				<data android:pathPattern=".*\\.elf" />
+				<data android:pathPattern=".*\\..*\\.elf" />
+				<data android:pathPattern=".*\\..*\\..*\\.elf" />
+				<data android:pathPattern=".*\\.ISO" />
+				<data android:pathPattern=".*\\..*\\.ISO" />
+				<data android:pathPattern=".*\\..*\\..*\\.ISO" />
+				<data android:pathPattern=".*\\.CSO" />
+				<data android:pathPattern=".*\\..*\\.CSO" />
+				<data android:pathPattern=".*\\..*\\..*\\.CSO" />
+				<data android:pathPattern=".*\\.ELF" />
+				<data android:pathPattern=".*\\..*\\.ELF" />
+				<data android:pathPattern=".*\\..*\\..*\\.ELF" />
 			</intent-filter>
         </activity>
         <meta-data android:name="isGame" android:value="true" />

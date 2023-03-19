@@ -15,15 +15,27 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+// Hack around name collisions between UI and xlib
+// Only affects this file.
+#undef VK_USE_PLATFORM_XLIB_KHR
+#undef VK_USE_PLATFORM_XCB_KHR
+#undef VK_USE_PLATFORM_DIRECTFB_EXT
+#undef VK_USE_PLATFORM_XLIB_XRANDR_EXT
+
 #include <algorithm>
 #include <cstring>
 
 #include "ppsspp_config.h"
 
+#include "Common/Common.h"
 #include "Common/System/Display.h"
 #include "Common/System/NativeApp.h"
 #include "Common/System/System.h"
 #include "Common/GPU/OpenGL/GLFeatures.h"
+
+#if !PPSSPP_PLATFORM(UWP)
+#include "Common/GPU/Vulkan/VulkanContext.h"
+#endif
 #include "Common/File/AndroidStorage.h"
 #include "Common/Data/Text/I18n.h"
 #include "Common/Net/HTTPClient.h"
@@ -55,6 +67,7 @@
 #include "UI/ControlMappingScreen.h"
 #include "UI/GameSettingsScreen.h"
 
+
 #ifdef _WIN32
 #include "Common/CommonWindows.h"
 // Want to avoid including the full header here as it includes d3dx.h
@@ -72,7 +85,7 @@ static const char *logLevelList[] = {
 	"Verb."
 };
 
-void DevMenu::CreatePopupContents(UI::ViewGroup *parent) {
+void DevMenuScreen::CreatePopupContents(UI::ViewGroup *parent) {
 	using namespace UI;
 	auto dev = GetI18NCategory("Developer");
 	auto sy = GetI18NCategory("System");
@@ -81,25 +94,25 @@ void DevMenu::CreatePopupContents(UI::ViewGroup *parent) {
 	LinearLayout *items = new LinearLayout(ORIENT_VERTICAL);
 
 #if !defined(MOBILE_DEVICE)
-	items->Add(new Choice(dev->T("Log View")))->OnClick.Handle(this, &DevMenu::OnLogView);
+	items->Add(new Choice(dev->T("Log View")))->OnClick.Handle(this, &DevMenuScreen::OnLogView);
 #endif
-	items->Add(new Choice(dev->T("Logging Channels")))->OnClick.Handle(this, &DevMenu::OnLogConfig);
-	items->Add(new Choice(sy->T("Developer Tools")))->OnClick.Handle(this, &DevMenu::OnDeveloperTools);
-	items->Add(new Choice(dev->T("Jit Compare")))->OnClick.Handle(this, &DevMenu::OnJitCompare);
-	items->Add(new Choice(dev->T("Shader Viewer")))->OnClick.Handle(this, &DevMenu::OnShaderView);
+	items->Add(new Choice(dev->T("Logging Channels")))->OnClick.Handle(this, &DevMenuScreen::OnLogConfig);
+	items->Add(new Choice(sy->T("Developer Tools")))->OnClick.Handle(this, &DevMenuScreen::OnDeveloperTools);
+	items->Add(new Choice(dev->T("Jit Compare")))->OnClick.Handle(this, &DevMenuScreen::OnJitCompare);
+	items->Add(new Choice(dev->T("Shader Viewer")))->OnClick.Handle(this, &DevMenuScreen::OnShaderView);
 	if (g_Config.iGPUBackend == (int)GPUBackend::VULKAN) {
-		// TODO: Make a new allocator visualizer for VMA.
-		// items->Add(new CheckBox(&g_Config.bShowAllocatorDebug, dev->T("Allocator Viewer")));
+		items->Add(new CheckBox(&g_Config.bShowAllocatorDebug, dev->T("Allocator Viewer")));
 		items->Add(new CheckBox(&g_Config.bShowGpuProfile, dev->T("GPU Profile")));
 	}
-	items->Add(new Choice(dev->T("Toggle Freeze")))->OnClick.Handle(this, &DevMenu::OnFreezeFrame);
-	items->Add(new Choice(dev->T("Dump Frame GPU Commands")))->OnClick.Handle(this, &DevMenu::OnDumpFrame);
-	items->Add(new Choice(dev->T("Toggle Audio Debug")))->OnClick.Handle(this, &DevMenu::OnToggleAudioDebug);
+	items->Add(new Choice(dev->T("Toggle Freeze")))->OnClick.Handle(this, &DevMenuScreen::OnFreezeFrame);
+
+	items->Add(new Choice(dev->T("Dump next frame to log")))->OnClick.Handle(this, &DevMenuScreen::OnDumpFrame);
+	items->Add(new Choice(dev->T("Toggle Audio Debug")))->OnClick.Handle(this, &DevMenuScreen::OnToggleAudioDebug);
 #ifdef USE_PROFILER
 	items->Add(new CheckBox(&g_Config.bShowFrameProfiler, dev->T("Frame Profiler"), ""));
 #endif
 	items->Add(new CheckBox(&g_Config.bDrawFrameGraph, dev->T("Draw Frametimes Graph")));
-	items->Add(new Choice(dev->T("Reset limited logging")))->OnClick.Handle(this, &DevMenu::OnResetLimitedLogging);
+	items->Add(new Choice(dev->T("Reset limited logging")))->OnClick.Handle(this, &DevMenuScreen::OnResetLimitedLogging);
 
 	scroll->Add(items);
 	parent->Add(scroll);
@@ -110,48 +123,48 @@ void DevMenu::CreatePopupContents(UI::ViewGroup *parent) {
 	}
 }
 
-UI::EventReturn DevMenu::OnToggleAudioDebug(UI::EventParams &e) {
+UI::EventReturn DevMenuScreen::OnToggleAudioDebug(UI::EventParams &e) {
 	g_Config.bShowAudioDebug = !g_Config.bShowAudioDebug;
 	return UI::EVENT_DONE;
 }
 
-UI::EventReturn DevMenu::OnResetLimitedLogging(UI::EventParams &e) {
+UI::EventReturn DevMenuScreen::OnResetLimitedLogging(UI::EventParams &e) {
 	Reporting::ResetCounts();
 	return UI::EVENT_DONE;
 }
 
-UI::EventReturn DevMenu::OnLogView(UI::EventParams &e) {
+UI::EventReturn DevMenuScreen::OnLogView(UI::EventParams &e) {
 	UpdateUIState(UISTATE_PAUSEMENU);
 	screenManager()->push(new LogScreen());
 	return UI::EVENT_DONE;
 }
 
-UI::EventReturn DevMenu::OnLogConfig(UI::EventParams &e) {
+UI::EventReturn DevMenuScreen::OnLogConfig(UI::EventParams &e) {
 	UpdateUIState(UISTATE_PAUSEMENU);
 	screenManager()->push(new LogConfigScreen());
 	return UI::EVENT_DONE;
 }
 
-UI::EventReturn DevMenu::OnDeveloperTools(UI::EventParams &e) {
+UI::EventReturn DevMenuScreen::OnDeveloperTools(UI::EventParams &e) {
 	UpdateUIState(UISTATE_PAUSEMENU);
-	screenManager()->push(new DeveloperToolsScreen());
+	screenManager()->push(new DeveloperToolsScreen(gamePath_));
 	return UI::EVENT_DONE;
 }
 
-UI::EventReturn DevMenu::OnJitCompare(UI::EventParams &e) {
+UI::EventReturn DevMenuScreen::OnJitCompare(UI::EventParams &e) {
 	UpdateUIState(UISTATE_PAUSEMENU);
 	screenManager()->push(new JitCompareScreen());
 	return UI::EVENT_DONE;
 }
 
-UI::EventReturn DevMenu::OnShaderView(UI::EventParams &e) {
+UI::EventReturn DevMenuScreen::OnShaderView(UI::EventParams &e) {
 	UpdateUIState(UISTATE_PAUSEMENU);
 	if (gpu)  // Avoid crashing if chosen while the game is being loaded.
 		screenManager()->push(new ShaderListScreen());
 	return UI::EVENT_DONE;
 }
 
-UI::EventReturn DevMenu::OnFreezeFrame(UI::EventParams &e) {
+UI::EventReturn DevMenuScreen::OnFreezeFrame(UI::EventParams &e) {
 	if (PSP_CoreParameter().frozen) {
 		PSP_CoreParameter().frozen = false;
 	} else {
@@ -160,12 +173,12 @@ UI::EventReturn DevMenu::OnFreezeFrame(UI::EventParams &e) {
 	return UI::EVENT_DONE;
 }
 
-UI::EventReturn DevMenu::OnDumpFrame(UI::EventParams &e) {
+UI::EventReturn DevMenuScreen::OnDumpFrame(UI::EventParams &e) {
 	gpu->DumpNextFrame();
 	return UI::EVENT_DONE;
 }
 
-void DevMenu::dialogFinished(const Screen *dialog, DialogResult result) {
+void DevMenuScreen::dialogFinished(const Screen *dialog, DialogResult result) {
 	UpdateUIState(UISTATE_INGAME);
 	// Close when a subscreen got closed.
 	// TODO: a bug in screenmanager causes this not to work here.
@@ -501,7 +514,15 @@ void SystemInfoScreen::CreateViews() {
 	const std::string apiNameKey = draw->GetInfoString(InfoField::APINAME);
 	const char *apiName = gr->T(apiNameKey);
 	deviceSpecs->Add(new InfoItem(si->T("3D API"), apiName));
-	deviceSpecs->Add(new InfoItem(si->T("Vendor"), draw->GetInfoString(InfoField::VENDORSTRING)));
+
+	// TODO: Not really vendor, on most APIs it's a device name (GL calls it vendor though).
+	std::string vendorString;
+	if (draw->GetDeviceCaps().deviceID != 0) {
+		vendorString = StringFromFormat("%s (%08x)", draw->GetInfoString(InfoField::VENDORSTRING).c_str(), draw->GetDeviceCaps().deviceID);
+	} else {
+		vendorString = draw->GetInfoString(InfoField::VENDORSTRING);
+	}
+	deviceSpecs->Add(new InfoItem(si->T("Vendor"), vendorString));
 	std::string vendor = draw->GetInfoString(InfoField::VENDOR);
 	if (vendor.size())
 		deviceSpecs->Add(new InfoItem(si->T("Vendor (detected)"), vendor));
@@ -532,6 +553,17 @@ void SystemInfoScreen::CreateViews() {
 			deviceSpecs->Add(new InfoItem(si->T("High precision float range"), temp));
 		}
 	}
+	deviceSpecs->Add(new InfoItem(si->T("Depth buffer format"), DataFormatToString(draw->GetDeviceCaps().preferredDepthBufferFormat)));
+
+	std::string texCompressionFormats;
+	// Simple non-detailed summary of supported tex compression formats.
+	if (draw->GetDataFormatSupport(Draw::DataFormat::ETC2_R8G8B8_UNORM_BLOCK)) texCompressionFormats += "ETC2 ";
+	if (draw->GetDataFormatSupport(Draw::DataFormat::ASTC_4x4_UNORM_BLOCK)) texCompressionFormats += "ASTC ";
+	if (draw->GetDataFormatSupport(Draw::DataFormat::BC1_RGBA_UNORM_BLOCK)) texCompressionFormats += "BC1-3 ";
+	if (draw->GetDataFormatSupport(Draw::DataFormat::BC4_UNORM_BLOCK)) texCompressionFormats += "BC4-5 ";
+	if (draw->GetDataFormatSupport(Draw::DataFormat::BC7_UNORM_BLOCK)) texCompressionFormats += "BC7 ";
+	deviceSpecs->Add(new InfoItem(si->T("Compressed texture formats"), texCompressionFormats));
+
 	deviceSpecs->Add(new ItemHeader(si->T("OS Information")));
 	deviceSpecs->Add(new InfoItem(si->T("Memory Page Size"), StringFromFormat(si->T("%d bytes"), GetMemoryProtectPageSize())));
 	deviceSpecs->Add(new InfoItem(si->T("RW/RX exclusive"), PlatformIsWXExclusive() ? di->T("Active") : di->T("Inactive")));
@@ -546,13 +578,13 @@ void SystemInfoScreen::CreateViews() {
 	deviceSpecs->Add(new InfoItem(si->T("PPSSPP build"), build));
 
 	deviceSpecs->Add(new ItemHeader(si->T("Audio Information")));
-	deviceSpecs->Add(new InfoItem(si->T("Sample rate"), StringFromFormat("%d Hz", System_GetPropertyInt(SYSPROP_AUDIO_SAMPLE_RATE))));
+	deviceSpecs->Add(new InfoItem(si->T("Sample rate"), StringFromFormat(si->T("%d Hz"), System_GetPropertyInt(SYSPROP_AUDIO_SAMPLE_RATE))));
 	int framesPerBuffer = System_GetPropertyInt(SYSPROP_AUDIO_FRAMES_PER_BUFFER);
 	if (framesPerBuffer > 0) {
 		deviceSpecs->Add(new InfoItem(si->T("Frames per buffer"), StringFromFormat("%d", framesPerBuffer)));
 	}
 #if PPSSPP_PLATFORM(ANDROID)
-	deviceSpecs->Add(new InfoItem(si->T("Optimal sample rate"), StringFromFormat("%d Hz", System_GetPropertyInt(SYSPROP_AUDIO_OPTIMAL_SAMPLE_RATE))));
+	deviceSpecs->Add(new InfoItem(si->T("Optimal sample rate"), StringFromFormat(si->T("%d Hz"), System_GetPropertyInt(SYSPROP_AUDIO_OPTIMAL_SAMPLE_RATE))));
 	deviceSpecs->Add(new InfoItem(si->T("Optimal frames per buffer"), StringFromFormat("%d", System_GetPropertyInt(SYSPROP_AUDIO_OPTIMAL_FRAMES_PER_BUFFER))));
 #endif
 
@@ -561,11 +593,16 @@ void SystemInfoScreen::CreateViews() {
 	deviceSpecs->Add(new InfoItem(si->T("Native Resolution"), StringFromFormat("%dx%d",
 		System_GetPropertyInt(SYSPROP_DISPLAY_XRES),
 		System_GetPropertyInt(SYSPROP_DISPLAY_YRES))));
+	deviceSpecs->Add(new InfoItem(si->T("UI Resolution"), StringFromFormat("%dx%d (%s: %0.2f)",
+		g_display.dp_xres,
+		g_display.dp_yres,
+		si->T("DPI"),
+		g_display.dpi)));
 #endif
 
 #if !PPSSPP_PLATFORM(WINDOWS)
 	// Don't show on Windows, since it's always treated as 60 there.
-	deviceSpecs->Add(new InfoItem(si->T("Refresh rate"), StringFromFormat("%0.3f Hz", (float)System_GetPropertyFloat(SYSPROP_DISPLAY_REFRESH_RATE))));
+	deviceSpecs->Add(new InfoItem(si->T("Refresh rate"), StringFromFormat(si->T("%0.2f Hz"), (float)System_GetPropertyFloat(SYSPROP_DISPLAY_REFRESH_RATE))));
 #endif
 
 	deviceSpecs->Add(new ItemHeader(si->T("Version Information")));
@@ -592,6 +629,19 @@ void SystemInfoScreen::CreateViews() {
 	deviceSpecs->Add(new InfoItem("Moga", moga));
 #endif
 
+	if (gstate_c.GetUseFlags()) {
+		// We're in-game, and can determine these.
+		// TODO: Call a static version of GPUCommon::CheckGPUFeatures() and derive them here directly.
+
+		deviceSpecs->Add(new ItemHeader(si->T("GPU Flags")));
+
+		for (int i = 0; i < 32; i++) {
+			if (gstate_c.Use((1 << i))) {
+				deviceSpecs->Add(new TextView(GpuUseFlagToString(i), new LayoutParams(FILL_PARENT, WRAP_CONTENT)))->SetFocusable(true);
+			}
+		}
+	}
+
 	ViewGroup *storageScroll = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(FILL_PARENT, FILL_PARENT));
 	storageScroll->SetTag("DevSystemInfoBuildConfig");
 	LinearLayout *storage = new LinearLayout(ORIENT_VERTICAL);
@@ -609,7 +659,7 @@ void SystemInfoScreen::CreateViews() {
 #if PPSSPP_PLATFORM(ANDROID)
 	storage->Add(new InfoItem("ExtFilesDir", g_extFilesDir));
 	bool scoped = System_GetPropertyBool(SYSPROP_ANDROID_SCOPED_STORAGE);
-	storage->Add(new InfoItem("Scoped Storage Enabled", scoped ? di->T("Yes") : di->T("No")));
+	storage->Add(new InfoItem("Scoped Storage", scoped ? di->T("Yes") : di->T("No")));
 	if (System_GetPropertyInt(SYSPROP_SYSTEMVERSION) >= 30) {
 		// This flag is only relevant on Android API 30+.
 		storage->Add(new InfoItem("IsStoragePreservedLegacy", Android_IsExternalStoragePreservedLegacy() ? di->T("Yes") : di->T("No")));
@@ -663,10 +713,29 @@ void SystemInfoScreen::CreateViews() {
 	tabHolder->AddTab(si->T("CPU Extensions"), cpuExtensionsScroll);
 
 	cpuExtensions->Add(new ItemHeader(si->T("CPU Extensions")));
-	std::vector<std::string> exts;
-	SplitString(cpu_info.Summarize(), ',', exts);
-	for (size_t i = 2; i < exts.size(); i++) {
-		cpuExtensions->Add(new TextView(exts[i], new LayoutParams(FILL_PARENT, WRAP_CONTENT)))->SetFocusable(true);
+	std::vector<std::string> exts = cpu_info.Features();
+	for (std::string &ext : exts) {
+		cpuExtensions->Add(new TextView(ext, new LayoutParams(FILL_PARENT, WRAP_CONTENT)))->SetFocusable(true);
+	}
+
+	ViewGroup *driverBugsScroll = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(FILL_PARENT, FILL_PARENT));
+	driverBugsScroll->SetTag("DevSystemInfoDriverBugs");
+	LinearLayout *driverBugs = new LinearLayoutList(ORIENT_VERTICAL);
+	driverBugs->SetSpacing(0);
+	driverBugsScroll->Add(driverBugs);
+
+	tabHolder->AddTab(si->T("Driver bugs"), driverBugsScroll);
+
+	bool anyDriverBugs = false;
+	for (int i = 0; i < (int)draw->GetBugs().MaxBugIndex(); i++) {
+		if (draw->GetBugs().Has(i)) {
+			anyDriverBugs = true;
+			driverBugs->Add(new TextView(draw->GetBugs().GetBugName(i), new LayoutParams(FILL_PARENT, WRAP_CONTENT)))->SetFocusable(true);
+		}
+	}
+
+	if (!anyDriverBugs) {
+		driverBugs->Add(new TextView(si->T("No GPU driver bugs detected"), new LayoutParams(FILL_PARENT, WRAP_CONTENT)))->SetFocusable(true);
 	}
 
 	ViewGroup *gpuExtensionsScroll = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(FILL_PARENT, FILL_PARENT));
@@ -720,6 +789,22 @@ void SystemInfoScreen::CreateViews() {
 		for (auto &feature : features) {
 			gpuExtensions->Add(new TextView(feature, new LayoutParams(FILL_PARENT, WRAP_CONTENT)))->SetFocusable(true);
 		}
+		
+#if !PPSSPP_PLATFORM(UWP)
+
+		// Vulkan specific code here, can't be bothered to abstract.
+		// OK because of above check.
+		gpuExtensions->Add(new ItemHeader(si->T("Display Color Formats")));
+		VulkanContext *vk = (VulkanContext *)draw->GetNativeObject(Draw::NativeObject::CONTEXT);
+		if (vk) {
+			for (auto &format : vk->SurfaceFormats()) {
+				std::string line = StringFromFormat("%s : %s", VulkanFormatToString(format.format), VulkanColorSpaceToString(format.colorSpace));
+				gpuExtensions->Add(new TextView(line,
+					new LayoutParams(FILL_PARENT, WRAP_CONTENT)))->SetFocusable(true);
+			}
+		}
+#endif
+
 		gpuExtensions->Add(new ItemHeader(si->T("Vulkan Extensions")));
 		std::vector<std::string> extensions = draw->GetExtensionList();
 		for (auto &extension : extensions) {
@@ -1068,13 +1153,7 @@ UI::EventReturn JitCompareScreen::OnCurrentBlock(UI::EventParams &e) {
 	JitBlockCache *blockCache = MIPSComp::jit->GetBlockCache();
 	if (!blockCache)
 		return UI::EVENT_DONE;
-	std::vector<int> blockNum;
-	blockCache->GetBlockNumbersFromAddress(currentMIPS->pc, &blockNum);
-	if (blockNum.size() > 0) {
-		currentBlock_ = blockNum[0];
-	} else {
-		currentBlock_ = -1;
-	}
+	currentBlock_ = blockCache->GetBlockNumberFromAddress(currentMIPS->pc);
 	UpdateDisasm();
 	return UI::EVENT_DONE;
 }
@@ -1083,9 +1162,10 @@ int ShaderListScreen::ListShaders(DebugShaderType shaderType, UI::LinearLayout *
 	using namespace UI;
 	std::vector<std::string> shaderIds_ = gpu->DebugGetShaderIDs(shaderType);
 	int count = 0;
-	for (auto id : shaderIds_) {
+	for (const auto &id : shaderIds_) {
 		Choice *choice = view->Add(new Choice(gpu->DebugGetShaderString(id, shaderType, SHADER_STRING_SHORT_DESC)));
 		choice->SetTag(id);
+		choice->SetDrawTextFlags(FLAG_DYNAMIC_ASCII);
 		choice->OnClick.Handle(this, &ShaderListScreen::OnShaderClick);
 		count++;
 	}
@@ -1095,10 +1175,10 @@ int ShaderListScreen::ListShaders(DebugShaderType shaderType, UI::LinearLayout *
 struct { DebugShaderType type; const char *name; } shaderTypes[] = {
 	{ SHADER_TYPE_VERTEX, "Vertex" },
 	{ SHADER_TYPE_FRAGMENT, "Fragment" },
-	// { SHADER_TYPE_GEOMETRY, "Geometry" },
+	{ SHADER_TYPE_GEOMETRY, "Geometry" },
 	{ SHADER_TYPE_VERTEXLOADER, "VertexLoader" },
 	{ SHADER_TYPE_PIPELINE, "Pipeline" },
-	{ SHADER_TYPE_DEPAL, "Depal" },
+	{ SHADER_TYPE_TEXTURE, "Texture" },
 	{ SHADER_TYPE_SAMPLER, "Sampler" },
 };
 
@@ -1139,7 +1219,7 @@ void ShaderViewScreen::CreateViews() {
 	LinearLayout *layout = new LinearLayout(ORIENT_VERTICAL);
 	root_ = layout;
 
-	layout->Add(new TextView(gpu->DebugGetShaderString(id_, type_, SHADER_STRING_SHORT_DESC)));
+	layout->Add(new TextView(gpu->DebugGetShaderString(id_, type_, SHADER_STRING_SHORT_DESC), FLAG_DYNAMIC_ASCII | FLAG_WRAP_TEXT, false));
 
 	ScrollView *scroll = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(1.0));
 	scroll->SetTag("DevShaderView");
@@ -1153,7 +1233,7 @@ void ShaderViewScreen::CreateViews() {
 	SplitString(gpu->DebugGetShaderString(id_, type_, SHADER_STRING_SOURCE_CODE), '\n', lines);
 
 	for (auto line : lines) {
-		lineLayout->Add(new TextView(line, FLAG_DYNAMIC_ASCII, true));
+		lineLayout->Add(new TextView(line, FLAG_DYNAMIC_ASCII | FLAG_WRAP_TEXT, true));
 	}
 
 	layout->Add(new Button(di->T("Back")))->OnClick.Handle<UIScreen>(this, &UIScreen::OnBack);

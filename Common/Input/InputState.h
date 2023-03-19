@@ -3,8 +3,6 @@
 // For more detailed and configurable input, implement NativeTouch, NativeKey and NativeAxis and do your
 // own mapping. Might later move the mapping system from PPSSPP to native.
 
-#include <map>
-#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -33,6 +31,10 @@ enum {
 	DEVICE_ID_XINPUT_2 = 22,
 	DEVICE_ID_XINPUT_3 = 23,
 	DEVICE_ID_ACCELEROMETER = 30,
+	DEVICE_ID_XR_HMD = 39,
+	DEVICE_ID_XR_CONTROLLER_LEFT = 40,
+	DEVICE_ID_XR_CONTROLLER_RIGHT = 41,
+	DEVICE_ID_TOUCH = 42,
 };
 
 //number of contiguous generic joypad IDs

@@ -4,7 +4,6 @@
 
 #include "ext/gason/gason.h"
 #include "Common/Common.h"
-#include "Common/Log.h"
 
 namespace json {
 
@@ -48,9 +47,11 @@ public:
 	JsonReader(const std::string &filename);
 	JsonReader(const void *data, size_t size) {
 		buffer_ = (char *)malloc(size + 1);
-		memcpy(buffer_, data, size);
-		buffer_[size] = 0;
-		parse();
+		if (buffer_) {
+			memcpy(buffer_, data, size);
+			buffer_[size] = 0;
+			parse();
+		}
 	}
 	JsonReader(const JsonNode *node) {
 		ok_ = true;
@@ -69,16 +70,7 @@ public:
 	const JsonValue rootValue() const { return root_; }
 
 private:
-	bool parse() {
-		char *error_pos;
-		int status = jsonParse(buffer_, &error_pos, &root_, alloc_);
-		if (status != JSON_OK) {
-			ERROR_LOG(IO, "Error at (%i): %s\n%s\n\n", (int)(error_pos - buffer_), jsonStrError(status), error_pos);
-			return false;
-		}
-		ok_ = true;
-		return true;
-	}
+	bool parse();
 
 	char *buffer_ = nullptr;
 	JsonAllocator alloc_;

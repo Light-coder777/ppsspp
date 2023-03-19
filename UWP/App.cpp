@@ -9,6 +9,7 @@
 #include "Common/System/NativeApp.h"
 #include "Common/System/System.h"
 #include "Core/System.h"
+#include "Core/Config.h"
 #include "Core/Core.h"
 
 #include <ppltasks.h>
@@ -56,20 +57,20 @@ void App::Initialize(CoreApplicationView^ applicationView) {
 	CoreApplication::Resuming +=
 		ref new EventHandler<Platform::Object^>(this, &App::OnResuming);
 
-	// At this point we have access to the device. 
+	// At this point we have access to the device.
 	// We can create the device-dependent resources.
 	m_deviceResources = std::make_shared<DX::DeviceResources>();
 }
 
 // Called when the CoreWindow object is created (or re-created).
 void App::SetWindow(CoreWindow^ window) {
-	window->SizeChanged += 
+	window->SizeChanged +=
 		ref new TypedEventHandler<CoreWindow^, WindowSizeChangedEventArgs^>(this, &App::OnWindowSizeChanged);
 
 	window->VisibilityChanged +=
 		ref new TypedEventHandler<CoreWindow^, VisibilityChangedEventArgs^>(this, &App::OnVisibilityChanged);
 
-	window->Closed += 
+	window->Closed +=
 		ref new TypedEventHandler<CoreWindow^, CoreWindowEventArgs^>(this, &App::OnWindowClosed);
 
 	DisplayInformation^ currentDisplayInformation = DisplayInformation::GetForCurrentView();
@@ -218,9 +219,10 @@ void App::OnActivated(CoreApplicationView^ applicationView, IActivatedEventArgs^
 	// Run() won't start until the CoreWindow is activated.
 	CoreWindow::GetForCurrentThread()->Activate();
 	// On mobile, we force-enter fullscreen mode.
-	if (m_isPhone) g_Config.bFullScreen = true;
+	if (m_isPhone)
+		g_Config.iForceFullScreen = 1;
 
-	if (g_Config.bFullScreen)
+	if (g_Config.UseFullScreen())
 		Windows::UI::ViewManagement::ApplicationView::GetForCurrentView()->TryEnterFullScreenMode();
 }
 
@@ -251,19 +253,21 @@ void App::OnResuming(Platform::Object^ sender, Platform::Object^ args) {
 void App::OnWindowSizeChanged(CoreWindow^ sender, WindowSizeChangedEventArgs^ args) {
 	auto view = Windows::UI::ViewManagement::ApplicationView::GetForCurrentView();
 	g_Config.bFullScreen = view->IsFullScreenMode;
+	g_Config.iForceFullScreen = -1;
 
 	float width = sender->Bounds.Width;
 	float height = sender->Bounds.Height;
 	float scale = m_deviceResources->GetDpi() / 96.0f;
 
 	m_deviceResources->SetLogicalSize(Size(width, height));
-	m_main->CreateWindowSizeDependentResources();
+	if (m_main) {
+		m_main->CreateWindowSizeDependentResources();
+	}
 
 	PSP_CoreParameter().pixelWidth = (int)(width * scale);
 	PSP_CoreParameter().pixelHeight = (int)(height * scale);
-
 	if (UpdateScreenScale((int)width, (int)height)) {
-		NativeMessageReceived("gpu_resized", "");
+		NativeMessageReceived("gpu_displayResized", "");
 	}
 }
 

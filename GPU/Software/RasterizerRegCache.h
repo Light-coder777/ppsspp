@@ -20,12 +20,15 @@
 #include "ppsspp_config.h"
 
 #include <cstdint>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
+#include "Common/Common.h"
 #if defined(_M_SSE)
 #include <emmintrin.h>
 #endif
-#if PPSSPP_ARCH(ARM_NEON) && PPSSPP_ARCH(ARM64)
+#if PPSSPP_ARCH(ARM64_NEON)
 #if defined(_MSC_VER) && PPSSPP_ARCH(ARM64)
 #include <arm64_neon.h>
 #else
@@ -35,12 +38,14 @@
 
 #if PPSSPP_ARCH(ARM)
 #include "Common/ArmEmitter.h"
-#elif PPSSPP_ARCH(ARM64)
+#elif PPSSPP_ARCH(ARM64_NEON)
 #include "Common/Arm64Emitter.h"
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
 #include "Common/x64Emitter.h"
 #elif PPSSPP_ARCH(MIPS)
 #include "Common/MipsEmitter.h"
+#elif PPSSPP_ARCH(RISCV64)
+#include "Common/RiscVEmitter.h"
 #else
 #include "Common/FakeEmitter.h"
 #endif
@@ -50,23 +55,26 @@ namespace Rasterizer {
 
 // While not part of the reg cache proper, this is the type it is built for.
 #if PPSSPP_ARCH(ARM)
-typedef ArmGen::ARMXCodeBlock CodeBlock;
-#elif PPSSPP_ARCH(ARM64)
-typedef Arm64Gen::ARM64CodeBlock CodeBlock;
+typedef ArmGen::ARMXCodeBlock BaseCodeBlock;
+#elif PPSSPP_ARCH(ARM64_NEON)
+typedef Arm64Gen::ARM64CodeBlock BaseCodeBlock;
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
-typedef Gen::XCodeBlock CodeBlock;
+typedef Gen::XCodeBlock BaseCodeBlock;
 #elif PPSSPP_ARCH(MIPS)
-typedef MIPSGen::MIPSCodeBlock CodeBlock;
+typedef MIPSGen::MIPSCodeBlock BaseCodeBlock;
+#elif PPSSPP_ARCH(RISCV64)
+typedef RiscVGen::RiscVCodeBlock BaseCodeBlock;
 #else
-typedef FakeGen::FakeXCodeBlock CodeBlock;
+typedef FakeGen::FakeXCodeBlock BaseCodeBlock;
 #endif
 
 // We also have the types of things that end up in regs.
-#if PPSSPP_ARCH(ARM64)
+#if PPSSPP_ARCH(ARM64_NEON)
 typedef int32x4_t Vec4IntArg;
 typedef int32x4_t Vec4IntResult;
 typedef float32x4_t Vec4FloatArg;
 static inline Vec4IntArg ToVec4IntArg(const Math3D::Vec4<int> &a) { return vld1q_s32(a.AsArray()); }
+static inline Vec4IntArg ToVec4IntArg(const Vec4IntResult &a) { return a; }
 static inline Vec4IntResult ToVec4IntResult(const Math3D::Vec4<int> &a) { return vld1q_s32(a.AsArray()); }
 static inline Vec4FloatArg ToVec4FloatArg(const Math3D::Vec4<float> &a) { return vld1q_f32(a.AsArray()); }
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
@@ -74,6 +82,7 @@ typedef __m128i Vec4IntArg;
 typedef __m128i Vec4IntResult;
 typedef __m128 Vec4FloatArg;
 static inline Vec4IntArg ToVec4IntArg(const Math3D::Vec4<int> &a) { return a.ivec; }
+static inline Vec4IntArg ToVec4IntArg(const Vec4IntResult &a) { return a; }
 static inline Vec4IntResult ToVec4IntResult(const Math3D::Vec4<int> &a) { return a.ivec; }
 static inline Vec4FloatArg ToVec4FloatArg(const Math3D::Vec4<float> &a) { return a.vec; }
 #else
@@ -98,10 +107,14 @@ struct RegCache {
 
 		VEC_ZERO = 0x0000,
 		VEC_RESULT = 0x0001,
+		VEC_RESULT1 = 0x0002,
+		VEC_U1 = 0x0003,
+		VEC_V1 = 0x0004,
+		VEC_INDEX = 0x0005,
+		VEC_INDEX1 = 0x0006,
 
 		GEN_SRC_ALPHA = 0x0100,
-		GEN_GSTATE = 0x0101,
-		GEN_CONST_BASE = 0x0102,
+		GEN_ID = 0x0101,
 		GEN_STENCIL = 0x0103,
 		GEN_COLOR_OFF = 0x0104,
 		GEN_DEPTH_OFF = 0x0105,
@@ -118,12 +131,16 @@ struct RegCache {
 		GEN_ARG_TEXPTR = 0x0187,
 		GEN_ARG_BUFW = 0x0188,
 		GEN_ARG_LEVEL = 0x0189,
-		GEN_ARG_U_PTR = 0x018A,
-		GEN_ARG_V_PTR = 0x018B,
-		GEN_ARG_FRAC_U = 0x018C,
-		GEN_ARG_FRAC_V = 0x018D,
+		GEN_ARG_TEXPTR_PTR = 0x018A,
+		GEN_ARG_BUFW_PTR = 0x018B,
+		GEN_ARG_LEVELFRAC = 0x018C,
 		VEC_ARG_COLOR = 0x0080,
 		VEC_ARG_MASK = 0x0081,
+		VEC_ARG_U = 0x0082,
+		VEC_ARG_V = 0x0083,
+		VEC_ARG_S = 0x0084,
+		VEC_ARG_T = 0x0085,
+		VEC_FRAC = 0x0086,
 
 		VEC_TEMP0 = 0x1000,
 		VEC_TEMP1 = 0x1001,
@@ -147,7 +164,7 @@ struct RegCache {
 #if PPSSPP_ARCH(ARM)
 	typedef ArmGen::ARMReg Reg;
 	static constexpr Reg REG_INVALID_VALUE = ArmGen::INVALID_REG;
-#elif PPSSPP_ARCH(ARM64)
+#elif PPSSPP_ARCH(ARM64_NEON)
 	typedef Arm64Gen::ARM64Reg Reg;
 	static constexpr Reg REG_INVALID_VALUE = Arm64Gen::INVALID_REG;
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
@@ -156,6 +173,9 @@ struct RegCache {
 #elif PPSSPP_ARCH(MIPS)
 	typedef MIPSGen::MIPSReg Reg;
 	static constexpr Reg REG_INVALID_VALUE = MIPSGen::INVALID_REG;
+#elif PPSSPP_ARCH(RISCV64)
+	typedef RiscVGen::RiscVReg Reg;
+	static constexpr Reg REG_INVALID_VALUE = RiscVGen::INVALID_REG;
 #else
 	typedef int Reg;
 	static constexpr Reg REG_INVALID_VALUE = -1;
@@ -166,6 +186,7 @@ struct RegCache {
 		Purpose purpose;
 		uint8_t locked = 0;
 		bool forceRetained = false;
+		bool everLocked = false;
 	};
 
 	// Note: Assumes __vectorcall on Windows.
@@ -196,11 +217,52 @@ struct RegCache {
 	void GrabReg(Reg r, Purpose p, bool &needsSwap, Reg swapReg, Purpose swapPurpose);
 	// For setting the purpose of a specific reg.  Returns false if it is locked.
 	bool ChangeReg(Reg r, Purpose p);
+	// Retrieves whether reg was ever used.
+	bool UsedReg(Reg r, Purpose flag);
 
 private:
 	RegStatus *FindReg(Reg r, Purpose p);
 
 	std::vector<RegStatus> regs;
+};
+
+class CodeBlock : public BaseCodeBlock {
+public:
+	virtual std::string DescribeCodePtr(const u8 *ptr);
+	virtual void Clear();
+
+protected:
+	CodeBlock(int size);
+
+	RegCache::Reg GetZeroVec();
+
+	void Describe(const std::string &message);
+	// Returns amount of stack space used.
+	int WriteProlog(int extraStack, const std::vector<RegCache::Reg> &vec, const std::vector<RegCache::Reg> &gen);
+	// Returns updated function start position, modifies prolog and finishes writing.
+	const u8 *WriteFinalizedEpilog();
+
+	void WriteSimpleConst16x8(const u8 *&ptr, uint8_t value);
+	void WriteSimpleConst8x16(const u8 *&ptr, uint16_t value);
+	void WriteSimpleConst4x32(const u8 *&ptr, uint32_t value);
+	void WriteDynamicConst16x8(const u8 *&ptr, uint8_t value);
+	void WriteDynamicConst8x16(const u8 *&ptr, uint16_t value);
+	void WriteDynamicConst4x32(const u8 *&ptr, uint32_t value);
+
+#if PPSSPP_ARCH(ARM64_NEON)
+	Arm64Gen::ARM64FloatEmitter fp;
+#endif
+
+	std::unordered_map<const u8 *, std::string> descriptions_;
+	Rasterizer::RegCache regCache_;
+
+private:
+	u8 *lastPrologStart_ = nullptr;
+	u8 *lastPrologEnd_ = nullptr;
+	int savedStack_;
+	int firstVecStack_;
+	std::vector<RegCache::Reg> prologVec_;
+	std::vector<RegCache::Reg> prologGen_;
 };
 
 };

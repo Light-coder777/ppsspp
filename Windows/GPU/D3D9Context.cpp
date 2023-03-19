@@ -13,7 +13,6 @@
 
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
-#include "Core/Reporting.h"
 #include "Core/System.h"
 #include "Common/OSVersion.h"
 #include "Windows/GPU/D3D9Context.h"
@@ -52,8 +51,8 @@ bool D3D9Context::Init(HINSTANCE hInst, HWND wnd, std::string *error_message) {
 	hWnd_ = wnd;
 
 	// D3D9 has no need for display rotation.
-	g_display_rotation = DisplayRotation::ROTATE_0;
-	g_display_rot_matrix.setIdentity();
+	g_display.rotation = DisplayRotation::ROTATE_0;
+	g_display.rot_matrix.setIdentity();
 
 	DIRECT3DCREATE9EX g_pfnCreate9ex;
 
@@ -160,8 +159,8 @@ bool D3D9Context::Init(HINSTANCE hInst, HWND wnd, std::string *error_message) {
 	}
 
 	device_->BeginScene();
-	DX9::pD3Ddevice = device_;
-	DX9::pD3DdeviceEx = deviceEx_;
+	pD3Ddevice9 = device_;
+	pD3DdeviceEx9 = deviceEx_;
 
 	if (deviceEx_ && IsWin7OrHigher()) {
 		// TODO: This makes it slower?
@@ -212,8 +211,8 @@ void D3D9Context::Shutdown() {
 	device_->Release();
 	d3d_->Release();
 	UnloadD3DCompiler();
-	DX9::pD3Ddevice = nullptr;
-	DX9::pD3DdeviceEx = nullptr;
+	pD3Ddevice9 = nullptr;
+	pD3DdeviceEx9 = nullptr;
 	device_ = nullptr;
 	hWnd_ = nullptr;
 	FreeLibrary(hD3D9_);

@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
-use std::io::{self, Write};
 use std::fs::File;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use crate::section::Section;
 
@@ -111,6 +111,10 @@ impl IniFile {
             }
         }
         // Reached the end for some reason? Add it.
+        // Also add an empty line to the previous section.
+        if let Some(last) = self.sections.last_mut() {
+            last.lines.push("".into());
+        }
         self.sections.push(section.clone());
         true
     }

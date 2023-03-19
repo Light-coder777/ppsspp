@@ -29,6 +29,13 @@
 #define V(i)   (currentMIPS->v[voffset[i]])
 #define VI(i)  (currentMIPS->vi[voffset[i]])
 
+// Flushes the angle to 0 if exponent smaller than this in vfpu_sin/vfpu_cos/vfpu_sincos.
+// Was measured to be around 0x68, but GTA on Mac is somehow super sensitive
+// to the shape of the sine curve which seem to be very slightly different.
+//
+// So setting a lower value.
+#define PRECISION_EXP_THRESHOLD 0x65
+
 union float2int {
 	uint32_t i;
 	float f;
@@ -343,6 +350,10 @@ void WriteMatrix(const float *rd, MatrixSize size, int reg) {
 }
 
 int GetVectorOverlap(int vec1, VectorSize size1, int vec2, VectorSize size2) {
+	// Different matrices?  Can't overlap, return early.
+	if (((vec1 >> 2) & 7) != ((vec2 >> 2) & 7))
+		return 0;
+
 	int n1 = GetNumVectorElements(size1);
 	int n2 = GetNumVectorElements(size2);
 	u8 regs1[4];
@@ -674,7 +685,7 @@ static int32_t get_sign(uint32_t x) {
 	return x & 0x80000000;
 }
 
-float vfpu_dot(float a[4], float b[4]) {
+float vfpu_dot(const float a[4], const float b[4]) {
 	static const int EXTRA_BITS = 2;
 	float2int result;
 	float2int src[2];
@@ -832,7 +843,7 @@ static inline uint32_t mant_mul(uint32_t a, uint32_t b) {
 	if (m & 0x007FFFFF) {
 		m += 0x01437000;
 	}
-	return m >> 23;
+	return (uint32_t)(m >> 23);
 }
 
 float vfpu_rsqrt(float a) {
@@ -895,7 +906,7 @@ float vfpu_sin(float a) {
 		return val.f;
 	}
 
-	if (k < 0x68) {
+	if (k < PRECISION_EXP_THRESHOLD) {
 		val.i &= 0x80000000;
 		return val.f;
 	}
@@ -941,7 +952,7 @@ float vfpu_cos(float a) {
 		return val.f;
 	}
 
-	if (k < 0x68)
+	if (k < PRECISION_EXP_THRESHOLD)
 		return 1.0f;
 
 	// Okay, now modulus by 4 to begin with (identical wave every 4.)
@@ -989,7 +1000,7 @@ void vfpu_sincos(float a, float &s, float &c) {
 		return;
 	}
 
-	if (k < 0x68) {
+	if (k < PRECISION_EXP_THRESHOLD) {
 		val.i &= 0x80000000;
 		s = val.f;
 		c = 1.0f;

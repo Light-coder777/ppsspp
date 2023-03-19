@@ -408,7 +408,8 @@ static u32 sceRtcGetDayOfWeek(u32 year, u32 month, u32 day)
 		restMonth = restMonth % 5;
 		day += grp5 * (31*3+30*2);
 		static u32 t[] = { 31, 31*2, 31*2+30, 31*3+30, 31*3+30*2 };
-		day += t[restMonth-1];
+		if (restMonth > 0)
+			day += t[restMonth-1];
 		month = 12;
 	}
 
@@ -426,7 +427,7 @@ static u32 sceRtcGetDayOfWeek(u32 year, u32 month, u32 day)
 	local.tm_hour = 0;
 	local.tm_min = 0;
 	local.tm_sec = 0;
-	local.tm_isdst = -1;
+	local.tm_isdst = 0;
 
 	mktime(&local);
 	return local.tm_wday;
@@ -878,6 +879,7 @@ static int sceRtcSetAlarmTick(u32 unknown1, u32 unknown2)
 	return 0; 
 }
 
+// Caller must check outPtr and srcTickPtr.
 static int __RtcFormatRFC2822(u32 outPtr, u32 srcTickPtr, int tz)
 {
 	u64 srcTick = Memory::Read_U64(srcTickPtr);
@@ -896,7 +898,7 @@ static int __RtcFormatRFC2822(u32 outPtr, u32 srcTickPtr, int tz)
 	local.tm_min += tz;
 	rtc_timegm(&local);
 
-	char *out = (char *)Memory::GetPointer(outPtr);
+	char *out = (char *)Memory::GetPointerWriteUnchecked(outPtr);
 	char *end = out + 32;
 	out += strftime(out, end - out, "%a, %d %b ", &local);
 	out += snprintf(out, end - out, "%04d", pt.year);
@@ -927,7 +929,7 @@ static int __RtcFormatRFC3339(u32 outPtr, u32 srcTickPtr, int tz)
 	local.tm_min += tz;
 	rtc_timegm(&local);
 
-	char *out = (char *)Memory::GetPointer(outPtr);
+	char *out = (char *)Memory::GetPointerWriteUnchecked(outPtr);
 	char *end = out + 32;
 	out += snprintf(out, end - out, "%04d", pt.year);
 	out += strftime(out, end - out, "-%m-%dT%H:%M:%S.00", &local);

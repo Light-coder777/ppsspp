@@ -46,7 +46,7 @@ public:
 		return T(key.c_str(), nullptr);
 	}
 
-	const std::map<std::string, std::string> &Missed() const {
+	const std::map<std::string, std::string> Missed() const {
 		std::lock_guard<std::mutex> guard(missedKeyLock_);
 		return missedKeyLog_;
 	}
@@ -89,8 +89,10 @@ public:
 	}
 	const char *T(const char *category, const char *key, const char *def = 0);
 
+	std::map<std::string, std::vector<std::string>> GetMissingKeys() const;
+
 private:
-	std::string GetIniPath(const std::string &languageID) const;
+	Path GetIniPath(const std::string &languageID) const;
 	void Clear();
 	I18NCategory *LoadSection(const Section *section, const char *name);
 	void SaveSection(IniFile &ini, Section *section, std::shared_ptr<I18NCategory> cat);
@@ -120,5 +122,7 @@ inline const char *T(const char *category, const char *key, const char *def = 0)
 	return i18nrepo.T(category, key, def);
 }
 
-
+inline std::map<std::string, std::vector<std::string>> GetI18NMissingKeys() {
+	return i18nrepo.GetMissingKeys();
+}
 

@@ -88,7 +88,7 @@ public:
 		RectVGradient(x, y, w, h, colorTop, darkenColor(colorTop));
 	}
 
-	void MultiVGradient(float x, float y, float w, float h, GradientStop *stops, int numStops);
+	void MultiVGradient(float x, float y, float w, float h, const GradientStop *stops, int numStops);
 
 	void RectCenter(float x, float y, float w, float h, uint32_t color) {
 		Rect(x - w/2, y - h/2, w, h, color);
@@ -180,6 +180,11 @@ public:
 		curZ_ = curZ;
 	}
 
+	void SetTintSaturation(float tint, float saturation) {
+		tint_ = tint;
+		saturation_ = saturation;
+	}
+
 private:
 	struct Vertex {
 		float x, y, z;
@@ -194,7 +199,6 @@ private:
 	std::vector<float> alphaStack_;
 
 	Draw::DrawContext *draw_ = nullptr;
-	Draw::Buffer *vbuf_ = nullptr;
 	Draw::Pipeline *pipeline_ = nullptr;
 
 	Vertex *verts_;
@@ -206,5 +210,7 @@ private:
 	float fontscalex = 1.0f;
 	float fontscaley = 1.0f;
 
+	float tint_ = 0.0f;
+	float saturation_ = 1.0f;
 	float curZ_ = 0.0f;
 };

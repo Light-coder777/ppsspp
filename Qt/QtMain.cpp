@@ -30,6 +30,7 @@
 #ifdef SDL
 #include "SDL/SDLJoystick.h"
 #include "SDL_audio.h"
+#include "SDL_keyboard.h"
 #endif
 
 #include "Common/System/NativeApp.h"
@@ -47,6 +48,7 @@
 #include "Core/ConfigValues.h"
 #include "Core/HW/Camera.h"
 
+#include <signal.h>
 #include <string.h>
 
 MainUI *emugl = nullptr;
@@ -70,7 +72,7 @@ static void InitSDLAudioDevice() {
 	fmt.freq = 44100;
 	fmt.format = AUDIO_S16;
 	fmt.channels = 2;
-	fmt.samples = 1024;
+	fmt.samples = 256;
 	fmt.callback = &mixaudio;
 	fmt.userdata = nullptr;
 
@@ -176,6 +178,19 @@ int System_GetPropertyInt(SystemProperty prop) {
 		return g_retFmt.freq;
 	case SYSPROP_AUDIO_FRAMES_PER_BUFFER:
 		return g_retFmt.samples;
+	case SYSPROP_KEYBOARD_LAYOUT:
+	{
+		// TODO: Use Qt APIs for detecting this
+		char q, w, y;
+		q = SDL_GetKeyFromScancode(SDL_SCANCODE_Q);
+		w = SDL_GetKeyFromScancode(SDL_SCANCODE_W);
+		y = SDL_GetKeyFromScancode(SDL_SCANCODE_Y);
+		if (q == 'a' && w == 'z' && y == 'y')
+			return KEYBOARD_LAYOUT_AZERTY;
+		else if (q == 'q' && w == 'w' && y == 'z')
+			return KEYBOARD_LAYOUT_QWERTZ;
+		return KEYBOARD_LAYOUT_QWERTY;
+	}
 #endif
 	case SYSPROP_DEVICE_TYPE:
 #if defined(__ANDROID__)
@@ -221,6 +236,8 @@ bool System_GetPropertyBool(SystemProperty prop) {
 	case SYSPROP_HAS_FILE_BROWSER:
 	case SYSPROP_HAS_FOLDER_BROWSER:
 		return true;
+	case SYSPROP_SUPPORTS_OPEN_FILE_IN_EDITOR:
+		return true;  // FileUtil.cpp: OpenFileInEditor
 	case SYSPROP_APP_GOLD:
 #ifdef GOLD
 		return true;
@@ -263,6 +280,7 @@ void System_SendMessage(const char *command, const char *parameter) {
 #endif
 	}
 }
+void System_Toast(const char *text) {}
 
 void System_AskForPermission(SystemPermission permission) {}
 PermissionStatus System_GetPermissionStatus(SystemPermission permission) { return PERMISSION_STATUS_GRANTED; }
@@ -400,13 +418,13 @@ QString MainUI::InputBoxGetQString(QString title, QString defaultValue) {
 
 void MainUI::resizeGL(int w, int h) {
 	if (UpdateScreenScale(w, h)) {
-		NativeMessageReceived("gpu_resized", "");
+		NativeMessageReceived("gpu_displayResized", "");
 	}
 	xscale = w / this->width();
 	yscale = h / this->height();
 
-	PSP_CoreParameter().pixelWidth = pixel_xres;
-	PSP_CoreParameter().pixelHeight = pixel_yres;
+	PSP_CoreParameter().pixelWidth = g_display.pixel_xres;
+	PSP_CoreParameter().pixelHeight = g_display.pixel_yres;
 }
 
 void MainUI::timerEvent(QTimerEvent *) {
@@ -435,15 +453,15 @@ bool MainUI::event(QEvent *e) {
 				break;
 			case Qt::TouchPointPressed:
 			case Qt::TouchPointReleased:
-				input.x = touchPoint.pos().x() * g_dpi_scale_x * xscale;
-				input.y = touchPoint.pos().y() * g_dpi_scale_y * yscale;
+				input.x = touchPoint.pos().x() * g_display.dpi_scale_x * xscale;
+				input.y = touchPoint.pos().y() * g_display.dpi_scale_y * yscale;
 				input.flags = (touchPoint.state() == Qt::TouchPointPressed) ? TOUCH_DOWN : TOUCH_UP;
 				input.id = touchPoint.id();
 				NativeTouch(input);
 				break;
 			case Qt::TouchPointMoved:
-				input.x = touchPoint.pos().x() * g_dpi_scale_x * xscale;
-				input.y = touchPoint.pos().y() * g_dpi_scale_y * yscale;
+				input.x = touchPoint.pos().x() * g_display.dpi_scale_x * xscale;
+				input.y = touchPoint.pos().y() * g_display.dpi_scale_y * yscale;
 				input.flags = TOUCH_MOVE;
 				input.id = touchPoint.id();
 				NativeTouch(input);
@@ -461,8 +479,8 @@ bool MainUI::event(QEvent *e) {
 	case QEvent::MouseButtonRelease:
 		switch(((QMouseEvent*)e)->button()) {
 		case Qt::LeftButton:
-			input.x = ((QMouseEvent*)e)->pos().x() * g_dpi_scale_x * xscale;
-			input.y = ((QMouseEvent*)e)->pos().y() * g_dpi_scale_y * yscale;
+			input.x = ((QMouseEvent*)e)->pos().x() * g_display.dpi_scale_x * xscale;
+			input.y = ((QMouseEvent*)e)->pos().y() * g_display.dpi_scale_y * yscale;
 			input.flags = (e->type() == QEvent::MouseButtonPress) ? TOUCH_DOWN : TOUCH_UP;
 			input.id = 0;
 			NativeTouch(input);
@@ -484,8 +502,8 @@ bool MainUI::event(QEvent *e) {
 		}
 		break;
 	case QEvent::MouseMove:
-		input.x = ((QMouseEvent*)e)->pos().x() * g_dpi_scale_x * xscale;
-		input.y = ((QMouseEvent*)e)->pos().y() * g_dpi_scale_y * yscale;
+		input.x = ((QMouseEvent*)e)->pos().x() * g_display.dpi_scale_x * xscale;
+		input.y = ((QMouseEvent*)e)->pos().y() * g_display.dpi_scale_y * yscale;
 		input.flags = TOUCH_MOVE;
 		input.id = 0;
 		NativeTouch(input);
@@ -696,6 +714,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	// Ignore sigpipe.
+	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+		perror("Unable to ignore SIGPIPE");
+	}
+
 	PROFILE_INIT();
 	glslang::InitializeProcess();
 #if defined(Q_OS_LINUX)
@@ -715,15 +738,15 @@ int main(int argc, char *argv[])
 
 	if (res.width() < res.height())
 		res.transpose();
-	pixel_xres = res.width();
-	pixel_yres = res.height();
+	g_display.pixel_xres = res.width();
+	g_display.pixel_yres = res.height();
 
-	g_dpi_scale_x = screen->logicalDotsPerInchX() / screen->physicalDotsPerInchX();
-	g_dpi_scale_y = screen->logicalDotsPerInchY() / screen->physicalDotsPerInchY();
-	g_dpi_scale_real_x = g_dpi_scale_x;
-	g_dpi_scale_real_y = g_dpi_scale_y;
-	dp_xres = (int)(pixel_xres * g_dpi_scale_x);
-	dp_yres = (int)(pixel_yres * g_dpi_scale_y);
+	g_display.dpi_scale_x = screen->logicalDotsPerInchX() / screen->physicalDotsPerInchX();
+	g_display.dpi_scale_y = screen->logicalDotsPerInchY() / screen->physicalDotsPerInchY();
+	g_display.dpi_scale_real_x = g_display.dpi_scale_x;
+	g_display.dpi_scale_real_y = g_display.dpi_scale_y;
+	g_display.dp_xres = (int)(g_display.pixel_xres * g_display.dpi_scale_x);
+	g_display.dp_yres = (int)(g_display.pixel_yres * g_display.dpi_scale_y);
 
 	refreshRate = screen->refreshRate();
 

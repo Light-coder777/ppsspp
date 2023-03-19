@@ -17,16 +17,30 @@
 
 #include <string>
 #include <sstream>
+#include <map>
+#include <mutex>
 
 #include "Common/Log.h"
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "Common/GPU/Vulkan/VulkanDebug.h"
 
+const int MAX_SAME_ERROR_COUNT = 10;
+
+// Used to stop outputting the same message over and over.
+static std::map<int, int> g_errorCount;
+std::mutex g_errorCountMutex;
+
+// TODO: Call this when launching games in some clean way.
+void VulkanClearValidationErrorCounts() {
+	std::lock_guard<std::mutex> lock(g_errorCountMutex);
+	g_errorCount.clear();
+}
+
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugUtilsCallback(
 	VkDebugUtilsMessageSeverityFlagBitsEXT           messageSeverity,
 	VkDebugUtilsMessageTypeFlagsEXT                  messageType,
-	const VkDebugUtilsMessengerCallbackDataEXT*      pCallbackData,
-	void*                                            pUserData) {
+	const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
+	void *pUserData) {
 	const VulkanLogOptions *options = (const VulkanLogOptions *)pUserData;
 	std::ostringstream message;
 
@@ -40,6 +54,30 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugUtilsCallback(
 	if (messageCode == 1303270965) {
 		// Benign perf warning, image blit using GENERAL layout.
 		// UNASSIGNED
+		return false;
+	}
+	if (messageCode == 606910136 || messageCode == -392708513 || messageCode == -384083808) {
+		// VUID-vkCmdDraw-None-02686
+		// Kinda false positive, or at least very unnecessary, now that I solved the real issue.
+		// See https://github.com/hrydgard/ppsspp/pull/16354
+		return false;
+	}
+	if (messageCode == -375211665) {
+		// VUID-vkAllocateMemory-pAllocateInfo-01713
+		// Can happen when VMA aggressively tries to allocate aperture memory for upload. It gracefully
+		// falls back to regular video memory, so we just ignore this. I'd argue this is a VMA bug, actually.
+		return false;
+	}
+
+	int count;
+	{
+		std::lock_guard<std::mutex> lock(g_errorCountMutex);
+		count = g_errorCount[messageCode]++;
+	}
+	if (count == MAX_SAME_ERROR_COUNT) {
+		WARN_LOG(G3D, "Too many validation messages with message %d, stopping", messageCode);
+	}
+	if (count >= MAX_SAME_ERROR_COUNT) {
 		return false;
 	}
 

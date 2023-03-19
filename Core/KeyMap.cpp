@@ -19,18 +19,13 @@
 #include <set>
 #include <unordered_map>
 
-#if defined(SDL)
-#include <SDL_keyboard.h>
-#elif defined(USING_WIN_UI)
-#include "CommonWindows.h"
-#endif
-
 #include "ppsspp_config.h"
 
 #include "Common/System/NativeApp.h"
 #include "Common/System/System.h"
 #include "Common/Data/Format/IniFile.h"
 #include "Common/Input/InputState.h"
+#include "Common/VR/PPSSPPVR.h"
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
 #include "Core/HLE/sceUtility.h"
@@ -46,6 +41,7 @@ KeyMapping g_controllerMap;
 // Incremented on modification, so we know when to update menus.
 int g_controllerMapGeneration = 0;
 std::set<std::string> g_seenPads;
+std::map<int, std::string> g_padNames;
 std::set<int> g_seenDeviceIds;
 
 bool g_swapped_keys = false;
@@ -87,6 +83,7 @@ void UpdateNativeMenuKeys() {
 	const KeyDef hardcodedConfirmKeys[] = {
 		KeyDef(DEVICE_ID_KEYBOARD, NKCODE_SPACE),
 		KeyDef(DEVICE_ID_KEYBOARD, NKCODE_ENTER),
+		KeyDef(DEVICE_ID_KEYBOARD, NKCODE_NUMPAD_ENTER),
 		KeyDef(DEVICE_ID_ANY, NKCODE_BUTTON_A),
 		KeyDef(DEVICE_ID_PAD_0, NKCODE_DPAD_CENTER),  // A number of Android devices.
 	};
@@ -307,6 +304,17 @@ static const KeyMap_IntStrPair key_names[] = {
 	{NKCODE_EXT_MOUSEWHEEL_UP, "MWheelU"},
 	{NKCODE_EXT_MOUSEWHEEL_DOWN, "MWheelD"},
 
+
+	{NKCODE_EXT_MOTION_UP, "MotionUp"},
+	{NKCODE_EXT_MOTION_DOWN, "MotionDown"},
+	{NKCODE_EXT_MOTION_LEFT, "MotionLeft"},
+	{NKCODE_EXT_MOTION_RIGHT, "MotionRight"},
+	{NKCODE_EXT_MOTION_FORWARD, "MotionFwd"},
+	{NKCODE_EXT_ROTATION_UP, "RotationUp"},
+	{NKCODE_EXT_ROTATION_DOWN, "RotationDown"},
+	{NKCODE_EXT_ROTATION_LEFT, "RotationLeft"},
+	{NKCODE_EXT_ROTATION_RIGHT, "RotationRight"},
+
 	{NKCODE_START_QUESTION, "¿"},
 	{NKCODE_LEFTBRACE, "{"},
 	{NKCODE_RIGHTBRACE, "}"},
@@ -373,6 +381,7 @@ const KeyMap_IntStrPair psp_button_names[] = {
 	{VIRTKEY_SPEED_TOGGLE, "SpeedToggle"},
 	{VIRTKEY_SPEED_CUSTOM1, "Alt speed 1"},
 	{VIRTKEY_SPEED_CUSTOM2, "Alt speed 2"},
+	{VIRTKEY_SPEED_ANALOG, "Analog speed"},
 	{VIRTKEY_PAUSE, "Pause"},
 #ifndef MOBILE_DEVICE
 	{VIRTKEY_FRAME_ADVANCE, "Frame Advance"},
@@ -400,6 +409,16 @@ const KeyMap_IntStrPair psp_button_names[] = {
 	{VIRTKEY_MUTE_TOGGLE, "Mute toggle"},
 	{VIRTKEY_ANALOG_ROTATE_CW, "Rotate Analog (CW)"},
 	{VIRTKEY_ANALOG_ROTATE_CCW, "Rotate Analog (CCW)"},
+
+#ifdef OPENXR
+	{VIRTKEY_VR_CAMERA_ADJUST, "VR camera adjust"},
+	{VIRTKEY_VR_CAMERA_RESET, "VR camera reset"},
+#else
+	{VIRTKEY_SCREEN_ROTATION_VERTICAL, "Display Portrait"},
+	{VIRTKEY_SCREEN_ROTATION_VERTICAL180, "Display Portrait Reversed"},
+	{VIRTKEY_SCREEN_ROTATION_HORIZONTAL, "Display Landscape"},
+	{VIRTKEY_SCREEN_ROTATION_HORIZONTAL180, "Display Landscape Reversed"},
+#endif
 
 	{CTRL_HOME, "Home"},
 	{CTRL_HOLD, "Hold"},
@@ -542,8 +561,10 @@ bool AxisFromPspButton(int btn, int *deviceId, int *axisId, int *direction) {
 	for (auto iter = g_controllerMap.begin(); iter != g_controllerMap.end(); ++iter) {
 		for (auto iter2 = iter->second.begin(); iter2 != iter->second.end(); ++iter2) {
 			if (iter->first == btn && iter2->keyCode >= AXIS_BIND_NKCODE_START) {
-				*deviceId = iter2->deviceId;
-				*axisId = TranslateKeyCodeToAxis(iter2->keyCode, *direction);
+				if (deviceId)
+					*deviceId = iter2->deviceId;
+				if (axisId)
+					*axisId = TranslateKeyCodeToAxis(iter2->keyCode, *direction);
 				return true;
 			}
 		}
@@ -605,7 +626,7 @@ bool IsKeyMapped(int device, int key) {
 
 bool ReplaceSingleKeyMapping(int btn, int index, KeyDef key) {
 	// Check for duplicate
-	for (int i = 0; i < g_controllerMap[btn].size(); ++i) {
+	for (int i = 0; i < (int)g_controllerMap[btn].size(); ++i) {
 		if (i != index && g_controllerMap[btn][i] == key) {
 			g_controllerMap[btn].erase(g_controllerMap[btn].begin()+index);
 			g_controllerMapGeneration++;
@@ -650,12 +671,20 @@ void SetAxisMapping(int btn, int deviceId, int axisId, int direction, bool repla
 void RestoreDefault() {
 	g_controllerMap.clear();
 	g_controllerMapGeneration++;
+
+	if (IsVREnabled()) {
+		SetDefaultKeyMap(DEFAULT_MAPPING_VR_HEADSET, false);
+		return;
+	}
+
 #if PPSSPP_PLATFORM(WINDOWS)
 	SetDefaultKeyMap(DEFAULT_MAPPING_KEYBOARD, true);
 	SetDefaultKeyMap(DEFAULT_MAPPING_XINPUT, false);
 	SetDefaultKeyMap(DEFAULT_MAPPING_PAD, false);
 #elif PPSSPP_PLATFORM(ANDROID)
 	// Autodetect a few common (and less common) devices
+	// Note that here we check the device name, not the controller name. We don't get
+	// the controller name until a button has been pressed so can't use it to set defaults.
 	std::string name = System_GetProperty(SYSPROP_NAME);
 	if (IsNvidiaShield(name)) {
 		SetDefaultKeyMap(DEFAULT_MAPPING_SHIELD, false);
@@ -664,10 +693,10 @@ void RestoreDefault() {
 	} else if (IsXperiaPlay(name)) {
 		SetDefaultKeyMap(DEFAULT_MAPPING_XPERIA_PLAY, false);
 	} else if (IsMOQII7S(name)) {
-		INFO_LOG(SYSTEM, "MOQI pad map");
 		SetDefaultKeyMap(DEFAULT_MAPPING_MOQI_I7S, false);
+	} else if (IsRetroid(name)) {
+		SetDefaultKeyMap(DEFAULT_MAPPING_RETRO_STATION_CONTROLLER, false);
 	} else {
-		INFO_LOG(SYSTEM, "Default pad map");
 		SetDefaultKeyMap(DEFAULT_MAPPING_ANDROID_PAD, false);
 	}
 #else
@@ -738,6 +767,12 @@ bool IsNvidiaShield(const std::string &name) {
 	return name == "NVIDIA:SHIELD";
 }
 
+bool IsRetroid(const std::string &name) {
+	// TODO: Not sure if there are differences between different Retroid devices.
+	// The one I have is a "Retroid Pocket 2+".
+	return startsWith(name, "Retroid:");
+}
+
 bool IsNvidiaShieldTV(const std::string &name) {
 	return name == "NVIDIA:SHIELD Android TV";
 }
@@ -751,11 +786,12 @@ bool IsMOQII7S(const std::string &name) {
 }
 
 bool HasBuiltinController(const std::string &name) {
-	return IsOuya(name) || IsXperiaPlay(name) || IsNvidiaShield(name) || IsMOQII7S(name);
+	return IsOuya(name) || IsXperiaPlay(name) || IsNvidiaShield(name) || IsMOQII7S(name) || IsRetroid(name);
 }
 
-void NotifyPadConnected(const std::string &name) {
+void NotifyPadConnected(int deviceId, const std::string &name) {
 	g_seenPads.insert(name);
+	g_padNames[deviceId] = name;
 }
 
 void AutoConfForPad(const std::string &name) {
@@ -766,8 +802,8 @@ void AutoConfForPad(const std::string &name) {
 #if PPSSPP_PLATFORM(ANDROID)
 	if (name.find("Xbox") != std::string::npos) {
 		SetDefaultKeyMap(DEFAULT_MAPPING_ANDROID_XBOX, false);
-	} else {
-		SetDefaultKeyMap(DEFAULT_MAPPING_ANDROID_PAD, false);
+	} else if (name == "Retro Station Controller") {
+		SetDefaultKeyMap(DEFAULT_MAPPING_RETRO_STATION_CONTROLLER, false);
 	}
 #else
 	// TODO: Should actually check for XInput?
@@ -786,6 +822,13 @@ void AutoConfForPad(const std::string &name) {
 
 const std::set<std::string> &GetSeenPads() {
 	return g_seenPads;
+}
+
+std::string PadName(int deviceId) {
+	auto it = g_padNames.find(deviceId);
+	if (it != g_padNames.end())
+		return it->second;
+	return "";
 }
 
 // Swap direction buttons and left analog axis

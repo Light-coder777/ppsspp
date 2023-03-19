@@ -259,7 +259,7 @@ void MemStickScreen::CreateViews() {
 		privateString = StringFromFormat("%s (%s)", iz->T("Skip for now"), privateString.c_str());
 	}
 
-	leftColumn->Add(new RadioButton(&choice_, CHOICE_PRIVATE_DIRECTORY, privateString.c_str()))->OnClick.Handle(this, &MemStickScreen::OnChoiceClick);
+	leftColumn->Add(new RadioButton(&choice_, CHOICE_PRIVATE_DIRECTORY, privateString))->OnClick.Handle(this, &MemStickScreen::OnChoiceClick);
 	if (choice_ == CHOICE_PRIVATE_DIRECTORY) {
 		AddExplanation(leftColumn, (MemStickScreen::Choice)choice_);
 	}
@@ -302,6 +302,8 @@ void MemStickScreen::CreateViews() {
 }
 
 UI::EventReturn MemStickScreen::OnHelp(UI::EventParams &params) {
+	// I'm letting the old redirect handle this one, as the target is within /docs on the website,
+	// and that structure may change a bit.
 	LaunchBrowser("https://www.ppsspp.org/guide_storage.html");
 
 	return UI::EVENT_DONE;
@@ -352,7 +354,7 @@ UI::EventReturn MemStickScreen::SetFolderManually(UI::EventParams &params) {
 
 			if (newPath.empty()) {
 				// Reuse below message instead of adding yet another string.
-				SystemToast(sy->T("Path does not exist!"));
+				System_Toast(sy->T("Path does not exist!"));
 				return;
 			}
 
@@ -386,7 +388,7 @@ UI::EventReturn MemStickScreen::SetFolderManually(UI::EventParams &params) {
 			}
 
 			if (!File::Exists(pendingMemStickFolder)) {
-				SystemToast(sy->T("Path does not exist!"));
+				System_Toast(sy->T("Path does not exist!"));
 				return;
 			}
 
@@ -409,6 +411,8 @@ UI::EventReturn MemStickScreen::UseInternalStorage(UI::EventParams &params) {
 			// This can't really happen?? Not worth making an error message.
 			ERROR_LOG_REPORT(SYSTEM, "Could not switch memstick path in setup (internal)");
 		}
+		// Don't have a confirmation dialog that would otherwise do it for us, need to just switch directly to the main screen.
+		screenManager()->switchScreen(new MainScreen());
 	} else if (pendingMemStickFolder != g_Config.memStickDirectory) {
 		// Always ask for confirmation when called from the UI. Likely there's already some data.
 		screenManager()->push(new ConfirmMemstickMoveScreen(pendingMemStickFolder, false));
@@ -505,15 +509,19 @@ static bool ListFileSuffixesRecursively(const Path &root, Path folder, std::vect
 		if (file.isDirectory) {
 			std::string dirSuffix;
 			if (root.ComputePathTo(file.fullName, dirSuffix)) {
-				dirSuffixes.push_back(dirSuffix);
-				ListFileSuffixesRecursively(root, folder / file.name, dirSuffixes, fileSuffixes);
+				if (!dirSuffix.empty()) {
+					dirSuffixes.push_back(dirSuffix);
+					ListFileSuffixesRecursively(root, folder / file.name, dirSuffixes, fileSuffixes);
+				}
 			} else {
 				ERROR_LOG_REPORT(SYSTEM, "Failed to compute PathTo from '%s' to '%s'", root.c_str(), folder.c_str());
 			}
 		} else {
 			std::string fileSuffix;
 			if (root.ComputePathTo(file.fullName, fileSuffix)) {
-				fileSuffixes.push_back(FileSuffix{ fileSuffix, file.size });
+				if (!fileSuffix.empty()) {
+					fileSuffixes.push_back(FileSuffix{ fileSuffix, file.size });
+				}
 			}
 		}
 	}
@@ -747,7 +755,7 @@ UI::EventReturn ConfirmMemstickMoveScreen::OnConfirm(UI::EventParams &params) {
 			}
 
 			return new MoveResult{ true, "", failedFiles };
-		}, TaskType::IO_BLOCKING);
+		}, TaskType::IO_BLOCKING, TaskPriority::HIGH);
 
 		RecreateViews();
 	} else {
